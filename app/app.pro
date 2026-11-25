@@ -443,9 +443,15 @@ wayland {
     HEADERS += streaming/video/ffmpeg-renderers/pacer/waylandvsyncsource.h
 }
 
-RESOURCES += \
-    resources.qrc \
-    qml.qrc
+RESOURCES += resources.qrc
+contains(DEFINES, AURORA_STREAM_RUNTIME) {
+    SOURCES -= gui/computermodel.cpp gui/appmodel.cpp gui/sdlgamepadkeynavigation.cpp \
+        backend/autoupdatechecker.cpp backend/systemproperties.cpp cli/quitstream.cpp
+    HEADERS -= gui/computermodel.h gui/appmodel.h gui/sdlgamepadkeynavigation.h \
+        backend/autoupdatechecker.h backend/systemproperties.h cli/quitstream.h
+} else {
+    RESOURCES += qml.qrc
+}
 
 TRANSLATIONS += \
     languages/qml_zh_CN.ts \

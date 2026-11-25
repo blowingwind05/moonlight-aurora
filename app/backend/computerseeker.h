@@ -32,4 +32,5 @@ private:
     QString m_ComputerName;
     QTimer *m_TimeoutTimer;
     bool m_LoadApps;
+    QString m_ExpectedPairedHost;
 };
