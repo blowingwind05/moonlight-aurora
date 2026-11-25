@@ -382,6 +382,22 @@ NvHTTP::getBoxArt(int appId)
     return image;
 }
 
+QByteArray NvHTTP::getAuroraWallpaper(const QString& revision)
+{
+    constexpr qint64 maxBytes = 512 * 1024;
+    QScopedPointer<QNetworkReply> reply(openConnection(m_BaseUrlHttps, "aurora-wallpaper",
+        "revision=" + revision, 3500, NvLogLevel::NVLL_ERROR, maxBytes));
+    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    if (status == 204) {
+        return {};
+    }
+    if (status != 200 || reply->header(QNetworkRequest::ContentTypeHeader).toString() != "image/jpeg" ||
+        reply->bytesAvailable() <= 0 || reply->bytesAvailable() > maxBytes) {
+        throw GfeHttpResponseException(400, "Invalid wallpaper preview");
+    }
+    return reply->readAll();
+}
+
 QByteArray
 NvHTTP::getXmlStringFromHex(QString xml,
                             QString tagName)
@@ -468,7 +484,8 @@ NvHTTP::openConnection(QUrl baseUrl,
                        QString command,
                        QString arguments,
                        int timeoutMs,
-                       NvLogLevel logLevel)
+                       NvLogLevel logLevel,
+                       qint64 maxBytes)
 {
     // Port must be set
     Q_ASSERT(baseUrl.port(0) != 0);
@@ -485,6 +502,11 @@ NvHTTP::openConnection(QUrl baseUrl,
                  ((arguments != nullptr) ? ("&" + arguments) : ""));
 
     QNetworkRequest request(url);
+    if (maxBytes > 0) {
+        request.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
+        request.setRawHeader("Accept-Encoding", "identity");
+        request.setRawHeader("Connection", "close");
+    }
 
     if (m_ExactEndpoint) {
         request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
@@ -507,6 +529,13 @@ NvHTTP::openConnection(QUrl baseUrl,
 #endif
 
     QNetworkReply* reply = m_Nam.get(request);
+    if (maxBytes > 0) {
+        connect(reply, &QIODevice::readyRead, reply, [reply, maxBytes]() {
+            if (reply->bytesAvailable() > maxBytes) {
+                reply->abort();
+            }
+        });
+    }
 
     // Run the request with a timeout if requested
     QEventLoop loop;
