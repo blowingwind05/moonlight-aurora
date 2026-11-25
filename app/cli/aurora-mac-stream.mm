@@ -3,6 +3,7 @@
 #include "backend/computermanager.h"
 #include "streaming/aurora-session-toolbar.h"
 #include "streaming/session.h"
+#include "qt-session/AuroraConnectionView.h"
 
 #import <AppKit/AppKit.h>
 #import <QuartzCore/QuartzCore.h>
@@ -15,6 +16,7 @@
 #include <QThreadPool>
 #include <QTimer>
 #include <functional>
+#include <memory>
 
 namespace {
 constexpr int RetryConnection = 75;
@@ -85,6 +87,7 @@ NSColor* rgb(unsigned color)
     std::function<void()> retry;
     std::function<void()> confirmQuit;
 @private
+    AuroraConnectionView* _qtView;
     NSTextField* _title;
     NSTextView* _detail;
     NSScrollView* _detailScroll;
@@ -95,7 +98,8 @@ NSColor* rgb(unsigned color)
 - (instancetype)initWithDeviceName:(NSString*)deviceName;
 - (void)showTitle:(NSString*)title detail:(NSString*)detail
          progress:(BOOL)progress failure:(BOOL)failure offerQuit:(BOOL)offerQuit;
-- (void)stopProgress;
+- (void)hideConnection;
+- (void)finish;
 @end
 
 @implementation AuroraConnectWindow
@@ -104,10 +108,32 @@ NSColor* rgb(unsigned color)
     const auto usable = NSScreen.mainScreen.visibleFrame;
     const CGFloat width = std::max<CGFloat>(400, std::min<CGFloat>(1000, NSWidth(usable) - 36));
     const CGFloat height = std::max<CGFloat>(236, std::min<CGFloat>(576, NSHeight(usable) - 72));
-    auto* window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, width, height)
-        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
-                  NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
-        backing:NSBackingStoreBuffered defer:NO];
+    std::unique_ptr<AuroraConnectionView> qt;
+    NSWindow* window = nil;
+    if (qEnvironmentVariableIntValue("AURORA_QT_SESSION") == 1 &&
+        QGuiApplication::platformName() == QStringLiteral("cocoa")) {
+        qt = std::make_unique<AuroraConnectionView>();
+        if (qt->status() == QQuickView::Ready) {
+            qt->setFlags(Qt::Window | Qt::CustomizeWindowHint | Qt::WindowTitleHint |
+                         Qt::WindowCloseButtonHint | Qt::WindowMinimizeButtonHint);
+            qt->setTitle(QString::fromNSString(deviceName));
+            qt->resize(qRound(width), qRound(height));
+            qt->setMinimumSize(QSize(400, 236));
+            // On Cocoa, QWindow::winId() refers to the platform NSView.
+            auto* view = reinterpret_cast<NSView*>(qt->winId());
+            window = [view.window retain];
+        }
+        if (!window) {
+            qWarning("Aurora Qt connection view could not be initialized. Using the native connection view.");
+            qt.reset();
+        }
+    }
+    if (!window) {
+        window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, width, height)
+            styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+                      NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
+            backing:NSBackingStoreBuffered defer:NO];
+    }
     if (!window) {
         [self release];
         return nil;
@@ -119,9 +145,17 @@ NSColor* rgb(unsigned color)
     [window release];
     if (!self) return nil;
 
-    self.window.delegate = self;
     installAuroraConnectionToolbar(self.window, deviceName, self, @selector(dismissWindow:));
     [self.window center];
+    if (qt) {
+        // Keep the Qt platform delegate responsible for the window lifecycle.
+        _qtView = qt.release();
+        _qtView->onDismiss = [self]() { [self dismissWindow:nil]; };
+        _qtView->onRetry = [self]() { [self retryConnection:nil]; };
+        _qtView->onQuitPrevious = [self]() { [self quitPreviousApp:nil]; };
+        return self;
+    }
+    self.window.delegate = self;
     NSView* content = self.window.contentView;
     content.wantsLayer = YES;
     content.layer.backgroundColor = rgb(0xf9fafc).CGColor;
@@ -185,6 +219,17 @@ NSColor* rgb(unsigned color)
          progress:(BOOL)progress failure:(BOOL)failure offerQuit:(BOOL)offerQuit
 {
     setAuroraConnectionToolbarFailed(self.window, failure);
+    if (_qtView) {
+        using Stage = AuroraConnectionView::Stage;
+        const auto state = progress ? Stage::Connecting : failure ? Stage::Failed : Stage::ConfirmQuit;
+        _qtView->showStage(state, QString::fromNSString(title), QString::fromNSString(detail ?: @""),
+                           NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion);
+        if (!_qtView->isVisible()) {
+            _qtView->show();
+            _qtView->requestActivate();
+        }
+        return;
+    }
     _title.stringValue = title;
     _title.toolTip = progress ? detail : title;
     if (progress && detail.length) {
@@ -207,7 +252,29 @@ NSColor* rgb(unsigned color)
 }
 
 - (void)windowDidResize:(NSNotification*)notification { [self layoutBody]; }
-- (void)stopProgress { [_spinner setRunning:NO]; }
+- (void)hideConnection
+{
+    if (_qtView) {
+        _qtView->hide();
+    } else {
+        [_spinner setRunning:NO];
+        [self.window orderOut:nil];
+    }
+}
+
+- (void)finish
+{
+    [self hideConnection];
+    if (_qtView) {
+        // Release the controller's native reference before Qt destroys its window.
+        self.window = nil;
+        delete _qtView;
+        _qtView = nullptr;
+    } else {
+        self.window.delegate = nil;
+        [self.window close];
+    }
+}
 - (void)dismissWindow:(id)sender { if (dismiss) dismiss(); }
 - (void)retryConnection:(id)sender { if (retry) retry(); }
 - (void)quitPreviousApp:(id)sender { if (confirmQuit) confirmQuit(); }
@@ -246,7 +313,7 @@ static int runConnectionAttempt(QGuiApplication& app, const QString& host, const
                        detail:nativeText(detail) progress:NO failure:YES offerQuit:NO];
         };
         window->dismiss = [&]() {
-            [window.window orderOut:nil];
+            [window hideConnection];
             if (failed || session == nullptr) {
                 cancelled = !failed;
                 app.exit(failed ? 1 : 0);
@@ -298,8 +365,7 @@ static int runConnectionAttempt(QGuiApplication& app, const QString& host, const
             });
             QObject::connect(session, &Session::connectionStarted, &launcher, [&]() {
                 connected = true;
-                [window stopProgress];
-                [window.window orderOut:nil];
+                [window hideConnection];
             });
             QObject::connect(session, &Session::sessionFinished, &launcher, [&](int portTestResult) {
                 if (!sessionError.isEmpty() && portTestResult > 0) {
@@ -365,9 +431,7 @@ int runAuroraMacStream(QGuiApplication& app, const QString& host, const QString&
             result = runConnectionAttempt(app, host, appName, preferences, window);
         } while (result == RetryConnection);
 
-        [window stopProgress];
-        window.window.delegate = nil;
-        [window.window close];
+        [window finish];
         [window release];
         return result;
     }
