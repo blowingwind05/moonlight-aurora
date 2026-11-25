@@ -592,4 +592,7 @@ macx {
 VERSION = "$$cat(version.txt)"
 DEFINES += VERSION_STR=\\\"$$cat(version.txt)\\\"
 
-contains(DEFINES, AURORA_STREAM_RUNTIME): include(AuroraStreamTargets.pri)
+contains(DEFINES, AURORA_STREAM_RUNTIME) {
+    DEFINES += AURORA_STREAM_HOST_IDENTITY
+    include(AuroraStreamTargets.pri)
+}

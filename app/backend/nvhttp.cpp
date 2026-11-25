@@ -5,6 +5,7 @@
 #endif
 #include <Limelight.h>
 
+#include <QCryptographicHash>
 #include <QDebug>
 #include <QUuid>
 #include <QtNetwork/QNetworkReply>
@@ -616,6 +617,15 @@ NvHTTP::openConnection(QUrl baseUrl,
 {
     // Port must be set
     Q_ASSERT(baseUrl.port(0) != 0);
+#ifdef AURORA_STREAM_HOST_IDENTITY
+    if (qEnvironmentVariableIsSet("AURORA_GAMESTREAM_HOST_CERTIFICATE_SHA256")) {
+        const auto expected = qgetenv("AURORA_GAMESTREAM_HOST_CERTIFICATE_SHA256");
+        if (!m_ExactEndpoint || baseUrl.scheme() != "https" || m_ServerCert.isNull() ||
+            expected.size() != 64 || m_ServerCert.digest(QCryptographicHash::Sha256).toHex() != expected) {
+            throw GfeHttpResponseException(401, "Host certificate does not match the authenticated Aurora device");
+        }
+    }
+#endif
 
     // Build a URL for the request
     QUrl url(baseUrl);
