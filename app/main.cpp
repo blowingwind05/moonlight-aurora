@@ -13,6 +13,8 @@
 #include <QTemporaryFile>
 #include <QRegularExpression>
 #include <QTimer>
+#include <algorithm>
+#include <array>
 #include <cstring>
 
 #ifdef AURORA_STREAM_RUNTIME
@@ -340,6 +342,7 @@ static int runAuroraPairedCommand(int argc, char** argv)
     const char* command = argv[1];
     const bool privacy = std::strcmp(command, "privacy") == 0;
     const bool bitrate = std::strcmp(command, "bitrate") == 0;
+    const bool probe = std::strcmp(command, "route-probe") == 0;
     AuroraBitrate::Request bitrateRequest;
     const int expectedArgumentCount = argc;
     if (bitrate && !AuroraBitrate::parseRequest(argc, argv, bitrateRequest)) {
@@ -369,8 +372,10 @@ static int runAuroraPairedCommand(int argc, char** argv)
     const auto uuidPattern = QRegularExpression(QStringLiteral(
         R"(\A[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\z)"));
     const int httpsPort = port + DEFAULT_HTTPS_PORT - DEFAULT_HTTP_PORT;
-    const bool validAction = bitrate || (privacy ? (action == "status" || action == "on" || action == "off") :
-        (action == "restart" || action == "shutdown"));
+    const bool validAction = bitrate || (probe
+        ? action == "sample" && qgetenv("AURORA_GAMESTREAM_HOST_CERTIFICATE_SHA256").size() == 64
+        : privacy ? (action == "status" || action == "on" || action == "off")
+                  : (action == "restart" || action == "shutdown"));
     if (address.isNull() || port > 65535 || httpsPort <= 0 ||
             !uuidPattern.match(uuid).hasMatch() || !validAction) {
         fprintf(stderr, "Invalid Aurora %s endpoint, host UUID, or action.\n", command);
@@ -397,7 +402,29 @@ static int runAuroraPairedCommand(int argc, char** argv)
     }
     try {
         NvHTTP http(target, static_cast<uint16_t>(httpsPort), certificate, true);
-        if (bitrate) {
+        if (probe) {
+            std::array<qint64, 3> measured{};
+            int successful = 0;
+            for (size_t trial = 0; trial < measured.size(); ++trial) {
+                QElapsedTimer timer;
+                timer.start();
+                try {
+                    const auto info = http.getServerInfo(NvHTTP::NVLL_NONE, true);
+                    if (!http.hasPinnedServerInfo() ||
+                        NvHTTP::getXmlString(info, "uniqueid").compare(uuid, Qt::CaseInsensitive) != 0 ||
+                        NvHTTP::getXmlString(info, "PairStatus") != "1") {
+                        return 4;
+                    }
+                    measured[successful++] = timer.elapsed();
+                } catch (const QtNetworkReplyException&) {
+                    // A timeout or connection failure is an unsuccessful sample.
+                }
+            }
+            std::sort(measured.begin(), measured.begin() + successful);
+            const qint64 median = successful
+                ? (measured[(successful - 1) / 2] + measured[successful / 2]) / 2 : 0;
+            printf("aurora-route/1,%d,%lld\n", successful, static_cast<long long>(median));
+        } else if (bitrate) {
             const auto result = http.sendAuroraBitrate(bitrateRequest, clientIdentity);
             puts(result.constData());
         } else if (privacy) {
@@ -511,8 +538,8 @@ int main(int argc, char *argv[])
     }
 
 #ifdef AURORA_STREAM_RUNTIME
-    if (argc > 1 && (std::strcmp(argv[1], "power") == 0 || std::strcmp(argv[1], "privacy") == 0 ||
-                     std::strcmp(argv[1], "bitrate") == 0)) {
+    if (operation == AuroraStreamOperation::Power || operation == AuroraStreamOperation::Privacy ||
+        operation == AuroraStreamOperation::Bitrate || operation == AuroraStreamOperation::RouteProbe) {
         return runAuroraPairedCommand(argc, argv);
     }
     if (argc > 1 && std::strcmp(argv[1], "wallpaper") == 0) {

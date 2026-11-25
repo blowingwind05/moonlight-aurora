@@ -1537,6 +1537,13 @@ bool Session::startConnectionAsync()
         routeLock.unlock();
         if (QThread::currentThread()->isInterruptionRequested()) return false;
 #endif
+#ifdef AURORA_STREAM_RUNTIME
+        if (qEnvironmentVariableIsSet("AURORA_STREAM_RESUME_ONLY") &&
+                (m_App.id <= 0 || m_Computer->currentGameId != m_App.id)) {
+            emit displayLaunchError(tr("The original application is no longer running on the host."));
+            return false;
+        }
+#endif
         http.startApp(m_Computer->currentGameId != 0 ? "resume" : "launch",
                       m_Computer->isNvidiaServerSoftware,
                       m_App.id, &m_StreamConfig,
