@@ -829,6 +829,10 @@ void Session::emitLaunchWarning(QString text)
     // Emit the warning to the UI
     emit displayLaunchWarning(text);
 
+#ifdef AURORA_STREAM_RUNTIME
+    // Aurora invokes the CLI runtime without the Moonlight warning toast.
+    qWarning().noquote() << text;
+#else
     // Wait a little bit so the user can actually read what we just said.
     // This wait is a little longer than the actual toast timeout (3 seconds)
     // to allow it to transition off the screen before continuing.
@@ -842,6 +846,7 @@ void Session::emitLaunchWarning(QString text)
             QCoreApplication::sendPostedEvents();
         }
     }
+#endif
 }
 
 bool Session::validateLaunch(SDL_Window* testWindow)
