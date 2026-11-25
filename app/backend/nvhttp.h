@@ -182,6 +182,7 @@ public:
     getBoxArt(int appId);
 
     QByteArray getAuroraWallpaper(const QString& revision);
+    void sendAuroraPower(const QString& action, const QSslConfiguration& clientIdentity);
 
     static
     QVector<NvDisplayMode>
@@ -199,7 +200,8 @@ private:
                    QString arguments,
                    int timeoutMs,
                    NvLogLevel logLevel,
-                   qint64 maxBytes = 0);
+                   qint64 maxBytes = 0,
+                   const QSslConfiguration* pinnedPostIdentity = nullptr);
 
     NvAddress m_Address;
     QNetworkAccessManager m_Nam;

@@ -11,6 +11,7 @@
 #include <QTimer>
 #include <QXmlStreamReader>
 #include <QSslKey>
+#include <QSslSocket>
 #include <QImageReader>
 #include <QtEndian>
 #include <QNetworkProxy>
@@ -423,6 +424,22 @@ QByteArray NvHTTP::getAuroraWallpaper(const QString& revision)
     return reply->readAll();
 }
 
+void NvHTTP::sendAuroraPower(const QString& action, const QSslConfiguration& clientIdentity)
+{
+    if (!m_ExactEndpoint || m_ServerCert.isNull() || (action != "restart" && action != "shutdown")) {
+        throw GfeHttpResponseException(400, "Invalid Aurora power request");
+    }
+
+    constexpr qint64 maxBytes = 64;
+    QScopedPointer<QNetworkReply> reply(openConnection(m_BaseUrlHttps, "aurora-power",
+        "action=" + action, REQUEST_TIMEOUT_MS, NVLL_NONE, maxBytes, &clientIdentity));
+    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    if (status < 200 || status >= 300 || reply->bytesAvailable() > maxBytes ||
+            reply->readAll().trimmed() != "accepted") {
+        throw GfeHttpResponseException(400, "Invalid Aurora power response");
+    }
+}
+
 QByteArray
 NvHTTP::getXmlStringFromHex(QString xml,
                             QString tagName)
@@ -468,6 +485,11 @@ void NvHTTP::handleSslErrors(QNetworkReply* reply, const QList<QSslError>& error
         return;
     }
 
+    if (reply->operation() == QNetworkAccessManager::PostOperation &&
+            reply->sslConfiguration().peerCertificate() != m_ServerCert) {
+        return;
+    }
+
     for (const QSslError& error : errors) {
         if (m_ServerCert != error.certificate()) {
             ignoreErrors = false;
@@ -510,7 +532,8 @@ NvHTTP::openConnection(QUrl baseUrl,
                        QString arguments,
                        int timeoutMs,
                        NvLogLevel logLevel,
-                       qint64 maxBytes)
+                       qint64 maxBytes,
+                       const QSslConfiguration* pinnedPostIdentity)
 {
     // Port must be set
     Q_ASSERT(baseUrl.port(0) != 0);
@@ -522,9 +545,13 @@ NvHTTP::openConnection(QUrl baseUrl,
     // Use a common UID for Moonlight clients to allow them to quit
     // games for each other (otherwise GFE gets screwed up and it requires
     // manual intervention to solve).
-    url.setQuery("uniqueid=0123456789ABCDEF&uuid=" +
-                 QUuid::createUuid().toRfc4122().toHex() +
-                 ((arguments != nullptr) ? ("&" + arguments) : ""));
+    if (pinnedPostIdentity) {
+        url.setQuery(arguments);
+    } else {
+        url.setQuery("uniqueid=0123456789ABCDEF&uuid=" +
+                     QUuid::createUuid().toRfc4122().toHex() +
+                     ((arguments != nullptr) ? ("&" + arguments) : ""));
+    }
 
     QNetworkRequest request(url);
     if (maxBytes > 0) {
@@ -538,7 +565,19 @@ NvHTTP::openConnection(QUrl baseUrl,
     }
 
     // Add our client certificate
-    request.setSslConfiguration(IdentityManager::get()->getSslConfig());
+    if (pinnedPostIdentity) {
+        // Trust only the paired leaf, even when another leaf has a system-trusted chain.
+        auto sslConfig = *pinnedPostIdentity;
+        sslConfig.setCaCertificates({});
+        sslConfig.setPeerVerifyMode(QSslSocket::VerifyPeer);
+        sslConfig.setSslOption(QSsl::SslOptionDisableSessionTickets, true);
+        sslConfig.setSslOption(QSsl::SslOptionDisableSessionSharing, true);
+        request.setSslConfiguration(sslConfig);
+        request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
+        m_Nam.clearConnectionCache();
+    } else {
+        request.setSslConfiguration(IdentityManager::get()->getSslConfig());
+    }
 
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
     // Disable HTTP/2 (GFE 3.22 doesn't like it) and Qt 6 enables it by default
@@ -553,7 +592,17 @@ NvHTTP::openConnection(QUrl baseUrl,
     QT_WARNING_POP
 #endif
 
-    QNetworkReply* reply = m_Nam.get(request);
+    QNetworkReply* reply = pinnedPostIdentity ? m_Nam.post(request, QByteArray()) : m_Nam.get(request);
+    if (pinnedPostIdentity) {
+        connect(reply, &QNetworkReply::encrypted, reply, [this, reply, powerHandshakeSeen = false]() mutable {
+            // Qt emits this before writing the HTTP request. Never resend a power POST
+            // on a new connection if the response was interrupted.
+            if (powerHandshakeSeen || reply->sslConfiguration().peerCertificate() != m_ServerCert) {
+                reply->abort();
+            }
+            powerHandshakeSeen = true;
+        });
+    }
     if (maxBytes > 0) {
         connect(reply, &QIODevice::readyRead, reply, [reply, maxBytes]() {
             if (reply->bytesAvailable() > maxBytes) {

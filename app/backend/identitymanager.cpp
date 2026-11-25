@@ -101,12 +101,16 @@ void IdentityManager::createCredentials(QSettings& settings)
     qInfo() << "Wrote new identity credentials to settings";
 }
 
-IdentityManager::IdentityManager()
+IdentityManager::IdentityManager(bool createMissingCredentials)
 {
     QSettings settings;
 
     m_CachedPemCert = settings.value(SER_CERT).toByteArray();
     m_CachedPrivateKey = settings.value(SER_KEY).toByteArray();
+
+    if (!createMissingCredentials) {
+        return;
+    }
 
     if (m_CachedPemCert.isEmpty() || m_CachedPrivateKey.isEmpty()) {
         qInfo() << "No existing credentials found";
@@ -180,6 +184,15 @@ IdentityManager::getSslConfig()
     sslConfig.setLocalCertificate(getSslCertificate());
     sslConfig.setPrivateKey(getSslKey());
     return sslConfig;
+}
+
+QSslConfiguration IdentityManager::readSavedSslConfig()
+{
+    IdentityManager identity(false);
+    if (identity.m_CachedPemCert.isEmpty() || identity.m_CachedPrivateKey.isEmpty()) {
+        return {};
+    }
+    return identity.getSslConfig();
 }
 
 QString

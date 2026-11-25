@@ -24,8 +24,10 @@ public:
     IdentityManager*
     get();
 
+    static QSslConfiguration readSavedSslConfig();
+
 private:
-    IdentityManager();
+    explicit IdentityManager(bool createMissingCredentials = true);
 
     QSslCertificate
     getSslCertificate();
