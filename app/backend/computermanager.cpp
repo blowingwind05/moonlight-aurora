@@ -695,6 +695,9 @@ public:
 
 signals:
     void quitAppFailed(QString error);
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    void quitAppVerified(NvComputer* computer);
+#endif
 
 private:
     void run()
@@ -702,9 +705,30 @@ private:
         NvHTTP http(m_Computer);
 
         try {
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+            QReadLocker readLock(&m_Computer->lock);
+            const int gameId = m_Computer->currentGameId;
+            readLock.unlock();
+            if (gameId != 0) {
+                // quitApp verifies via serverinfo that the host is idle.
+                http.quitApp();
+            }
+            QWriteLocker writeLock(&m_Computer->lock);
+            if (m_Computer->currentGameId == gameId) m_Computer->currentGameId = 0;
+            if (m_Computer->currentGameId != 0) {
+                m_Computer->pendingQuit = false;
+                writeLock.unlock();
+                emit quitAppFailed(tr("Another app started on the host. Try connecting again."));
+                return;
+            }
+            writeLock.unlock();
+            // The CLI seeker can stop polling once it has found the paired host.
+            emit quitAppVerified(m_Computer);
+#else
             if (m_Computer->currentGameId != 0) {
                 http.quitApp();
             }
+#endif
         } catch (const GfeHttpResponseException& e) {
             {
                 QWriteLocker lock(&m_Computer->lock);
@@ -736,6 +760,10 @@ void ComputerManager::quitRunningApp(NvComputer* computer)
     computer->pendingQuit = true;
 
     PendingQuitTask* quit = new PendingQuitTask(this, computer);
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    connect(quit, &PendingQuitTask::quitAppVerified,
+            this, &ComputerManager::handleComputerStateChanged);
+#endif
     QThreadPool::globalInstance()->start(quit);
 }
 

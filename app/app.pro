@@ -1,6 +1,10 @@
 QT += core quick network quickcontrols2 svg
 
+contains(DEFINES, AURORA_STREAM_RUNTIME) {
+    HEADERS += cli/aurora-stream.h
+}
 win32:contains(DEFINES, AURORA_STREAM_RUNTIME) {
+    SOURCES += cli/aurora-windows-stream.cpp
     HEADERS += qt-session/AuroraConnectionView.h qt-session/AuroraEmbeddedConnectionView.h
     RESOURCES += qt-session/connection-stage.qrc
 }
@@ -388,6 +392,16 @@ win32:!winrt {
 }
 macx {
     message(VideoToolbox renderer selected)
+
+    contains(DEFINES, AURORA_STREAM_RUNTIME) {
+        SOURCES += cli/aurora-mac-stream.mm \
+                   streaming/aurora-session-toolbar.mm streaming/aurora-session-privacy.cpp
+        HEADERS += qt-session/AuroraConnectionView.h
+        RESOURCES += qt-session/connection-stage.qrc
+        HEADERS += streaming/aurora-session-toolbar.h streaming/aurora-session-privacy.h \
+                   streaming/aurora-session-toolbar-layout.h
+        LIBS += -framework CoreFoundation -framework QuartzCore
+    }
 
     SOURCES += \
         streaming/video/ffmpeg-renderers/vt_avsamplelayer.mm \

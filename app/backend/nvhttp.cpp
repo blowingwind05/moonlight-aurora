@@ -10,6 +10,9 @@
 #include <QtNetwork/QNetworkReply>
 #include <QEventLoop>
 #include <QTimer>
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+#include <QThread>
+#endif
 #include <QXmlStreamReader>
 #include <QSslKey>
 #include <QSslSocket>
@@ -690,6 +693,16 @@ NvHTTP::openConnection(QUrl baseUrl,
     }
     connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
     connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, &loop, &QEventLoop::quit);
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    // The native connection window can cancel while the worker awaits /launch or /resume.
+    QTimer cancelTimer;
+    if (command == QStringLiteral("launch") || command == QStringLiteral("resume")) {
+        connect(&cancelTimer, &QTimer::timeout, &loop, [&loop]() {
+            if (QThread::currentThread()->isInterruptionRequested()) loop.quit();
+        });
+        cancelTimer.start(50);
+    }
+#endif
     if (timeoutMs) {
         QTimer::singleShot(timeoutMs, &loop, &QEventLoop::quit);
     }

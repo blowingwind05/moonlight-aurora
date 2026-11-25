@@ -12,6 +12,11 @@
 #include <SDL.h>
 #include "utils.h"
 
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+#include "aurora-session-privacy.h"
+#include "aurora-session-toolbar.h"
+#endif
+
 #ifdef HAVE_FFMPEG
 #include "video/ffmpeg.h"
 #endif
@@ -89,6 +94,9 @@ void Session::clStageStarting(int stage)
 
 void Session::clStageFailed(int stage, int errorCode)
 {
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    if (QThread::currentThread()->isInterruptionRequested()) return;
+#endif
     // Perform the port test now, while we're on the async connection thread and not blocking the UI.
     unsigned int portFlags = LiGetPortFlagsFromStage(stage);
     s_ActiveSession->m_PortTestResults = LiTestClientConnectivity(CONN_TEST_SERVER, 443, portFlags);
@@ -192,6 +200,18 @@ void Session::clConnectionStatusUpdate(int connectionStatus)
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "Connection status update: %d",
                 connectionStatus);
+
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    if (connectionStatus == CONN_STATUS_OKAY || connectionStatus == CONN_STATUS_POOR) {
+        const int poor = connectionStatus == CONN_STATUS_POOR;
+        if (SDL_AtomicSet(&s_ActiveSession->m_AuroraConnectionPoor, poor) != poor) {
+            SDL_Event event = {};
+            event.type = SDL_USEREVENT;
+            event.user.code = static_cast<Sint32>(AuroraToolbarAction::ConnectionQualityChanged);
+            SDL_PushEvent(&event);
+        }
+    }
+#endif
 
     if (!s_ActiveSession->m_Preferences->connectionWarnings) {
         return;
@@ -1162,6 +1182,20 @@ void Session::getWindowDimensions(int& x, int& y,
         displayIndex = SDL_GetWindowDisplayIndex(m_Window);
         SDL_assert(displayIndex >= 0);
     }
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    else if (m_AuroraNativeLaunch) {
+        if (m_AuroraScreenGeometry.isValid()) {
+            for (int i = 0; i < SDL_GetNumVideoDisplays(); i++) {
+                SDL_Rect bounds;
+                if (SDL_GetDisplayBounds(i, &bounds) == 0 &&
+                    bounds.x == m_AuroraScreenGeometry.x() && bounds.y == m_AuroraScreenGeometry.y()) {
+                    displayIndex = i;
+                    break;
+                }
+            }
+        }
+    }
+#endif
     // Create our window on the same display that Qt's UI
     // was being displayed on.
     else {
@@ -1201,6 +1235,16 @@ void Session::getWindowDimensions(int& x, int& y,
         }
     }
 
+    int videoWidth = m_StreamConfig.width;
+    int videoHeight = m_StreamConfig.height;
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    // The video setup callback has reported the stream size before the viewer is created.
+    if (m_ActiveVideoWidth > 0 && m_ActiveVideoHeight > 0) {
+        videoWidth = m_ActiveVideoWidth;
+        videoHeight = m_ActiveVideoHeight;
+    }
+#endif
+
     SDL_Rect usableBounds;
     if (SDL_GetDisplayUsableBounds(displayIndex, &usableBounds) == 0) {
         // Don't use more than 80% of the display to leave room for system UI
@@ -1208,8 +1252,8 @@ void Session::getWindowDimensions(int& x, int& y,
         // of the image will have a one-pixel black bar next to it).
         SDL_Rect src, dst;
         src.x = src.y = dst.x = dst.y = 0;
-        src.w = m_StreamConfig.width;
-        src.h = m_StreamConfig.height;
+        src.w = videoWidth;
+        src.h = videoHeight;
         dst.w = ((int)SDL_ceilf(usableBounds.w * 0.80f) & ~0x1);
         dst.h = ((int)SDL_ceilf(usableBounds.h * 0.80f) & ~0x1);
 
@@ -1218,9 +1262,9 @@ void Session::getWindowDimensions(int& x, int& y,
 
         // If the stream window can fit within the usable drawing area with 1:1
         // scaling, do that rather than filling the screen.
-        if (m_StreamConfig.width < dst.w && m_StreamConfig.height < dst.h) {
-            width = m_StreamConfig.width;
-            height = m_StreamConfig.height;
+        if (videoWidth < dst.w && videoHeight < dst.h) {
+            width = videoWidth;
+            height = videoHeight;
         }
         else {
             width = dst.w;
@@ -1232,8 +1276,8 @@ void Session::getWindowDimensions(int& x, int& y,
                      "SDL_GetDisplayUsableBounds() failed: %s",
                      SDL_GetError());
 
-        width = m_StreamConfig.width;
-        height = m_StreamConfig.height;
+        width = videoWidth;
+        height = videoHeight;
     }
 
     x = y = SDL_WINDOWPOS_CENTERED_DISPLAY(displayIndex);
@@ -1361,7 +1405,14 @@ void Session::toggleFullscreen()
 #endif
 
     // Actually enter/leave fullscreen
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    prepareAuroraSessionToolbarForFullscreenChange(m_Window, fullScreen);
     SDL_SetWindowFullscreen(m_Window, fullScreen ? m_FullScreenFlag : 0);
+    installAuroraSessionToolbar(m_Window, m_Computer->name, SDL_AtomicGet(&m_AuroraConnectionPoor) != 0,
+                                m_AuroraPrivacy, m_ActiveVideoWidth, m_ActiveVideoHeight);
+#else
+    SDL_SetWindowFullscreen(m_Window, fullScreen ? m_FullScreenFlag : 0);
+#endif
 
 #ifdef Q_OS_DARWIN
     // SDL on macOS has a bug that causes the window size to be reset to crazy
@@ -1418,9 +1469,10 @@ public:
 // Called in a non-main thread
 bool Session::startConnectionAsync()
 {
-    // Wait 1.5 seconds before connecting to let the user
-    // have time to read any messages present on the segue
+#ifndef AURORA_STREAM_RUNTIME
+    // Allow the upstream QML segue to present its startup messages.
     SDL_Delay(1500);
+#endif
 
 #if defined(Q_OS_WIN32) && defined(AURORA_STREAM_RUNTIME)
     if (AuroraEmbeddedSession::current().stopRequested()) {
@@ -1457,9 +1509,27 @@ bool Session::startConnectionAsync()
     }
 
     QString rtspSessionUrl;
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    NvAddress launchAddress;
+    int launchHttpsPort = 0;
+    QString launchUuid;
+    bool hasPinnedCertificate = false;
+#endif
 
     try {
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+        QReadLocker routeLock(&m_Computer->lock);
+#endif
         NvHTTP http(m_Computer);
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+        // This address is the one used for /launch or /resume, not a later discovery result.
+        launchAddress = http.address();
+        launchHttpsPort = http.httpsPort();
+        launchUuid = m_Computer->uuid;
+        hasPinnedCertificate = !http.serverCert().isNull();
+        routeLock.unlock();
+        if (QThread::currentThread()->isInterruptionRequested()) return false;
+#endif
         http.startApp(m_Computer->currentGameId != 0 ? "resume" : "launch",
                       m_Computer->isNvidiaServerSoftware,
                       m_App.id, &m_StreamConfig,
@@ -1472,15 +1542,23 @@ bool Session::startConnectionAsync()
         emit displayLaunchError(tr("Host returned error: %1").arg(e.toQString()));
         return false;
     } catch (const QtNetworkReplyException& e) {
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+        if (QThread::currentThread()->isInterruptionRequested()) return false;
+#endif
         emit displayLaunchError(e.toQString());
         return false;
     }
 
-    QByteArray hostnameStr = m_Computer->activeAddress.address().toLatin1();
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    const auto& streamAddress = launchAddress;
+#else
+    const auto& streamAddress = m_Computer->activeAddress;
+#endif
+    QByteArray hostnameStr = streamAddress.address().toLatin1();
     QByteArray siAppVersion = m_Computer->appVersion.toLatin1();
 
     SERVER_INFORMATION hostInfo = {};
-    hostInfo.auroraRelayBasePort = NvHTTP::gameStreamRelayBase(m_Computer->activeAddress);
+    hostInfo.auroraRelayBasePort = NvHTTP::gameStreamRelayBase(streamAddress);
     hostInfo.address = hostnameStr.data();
     hostInfo.serverInfoAppVersion = siAppVersion.data();
     hostInfo.serverCodecModeSupport = m_Computer->serverCodecModeSupport;
@@ -1545,6 +1623,8 @@ bool Session::startConnectionAsync()
     if (AuroraEmbeddedSession::current().stopRequested()) {
         return false;
     }
+#elif defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    if (QThread::currentThread()->isInterruptionRequested()) return false;
 #endif
     int err = LiStartConnection(&hostInfo, &m_StreamConfig, &k_ConnCallbacks,
                                 &m_VideoCallbacks, &m_AudioCallbacks,
@@ -1555,6 +1635,10 @@ bool Session::startConnectionAsync()
         return false;
     }
 
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    m_AuroraPrivacy = std::make_shared<AuroraSessionPrivacy>(
+        makeAuroraPrivacyTarget(launchAddress, launchHttpsPort, launchUuid, hasPinnedCertificate));
+#endif
     emit connectionStarted();
     return true;
 }
@@ -1628,6 +1712,20 @@ void Session::exec(QWindow* qtWindow)
     }
 }
 
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+void Session::execAurora(const QRect& screenGeometry)
+{
+    m_AuroraNativeLaunch = true;
+    m_AuroraScreenGeometry = screenGeometry;
+    exec(nullptr);
+}
+
+void Session::cancelAuroraConnection()
+{
+    m_AuroraConnectionCancelled = true;
+}
+#endif
+
 void Session::execInternal()
 {
     // Complete initialization in this deferred context to avoid
@@ -1673,6 +1771,10 @@ void Session::execInternal()
     AsyncConnectionStartThread asyncConnThread(this);
     if (!m_ThreadedExec) {
         // Kick off the async connection thread while we sit here and pump the event loop
+        QEventLoop::ProcessEventsFlags eventFlags = QEventLoop::ExcludeUserInputEvents;
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+        if (m_AuroraNativeLaunch) eventFlags = QEventLoop::AllEvents;
+#endif
         asyncConnThread.start();
         while (!asyncConnThread.wait(10)) {
 #if defined(Q_OS_WIN32) && defined(AURORA_STREAM_RUNTIME)
@@ -1680,13 +1782,20 @@ void Session::execInternal()
                 LiInterruptConnection();
             }
 #endif
-            QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+            QCoreApplication::processEvents(eventFlags);
             QCoreApplication::sendPostedEvents();
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+            if (m_AuroraConnectionCancelled) {
+                asyncConnThread.requestInterruption();
+                // LiStartConnection clears its interrupt flag on entry. Keep signalling
+                // until the worker has stopped, including when cancellation races entry.
+                LiInterruptConnection();
+            }
+#endif
         }
 
-        // Pump the event loop one last time to ensure we pick up any events from
-        // the thread that happened while it was in the final successful QThread::wait().
-        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+        // Deliver final status and any pending cancellation before creating the viewer.
+        QCoreApplication::processEvents(eventFlags);
         QCoreApplication::sendPostedEvents();
     }
     else {
@@ -1696,6 +1805,9 @@ void Session::execInternal()
         asyncConnThread.run();
     }
 
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    if (m_AuroraConnectionCancelled) m_AsyncConnectionSuccess = false;
+#endif
     // If the connection failed, clean up and abort the connection.
     if (!m_AsyncConnectionSuccess) {
         delete m_InputHandler;
@@ -1753,7 +1865,11 @@ void Session::execInternal()
     // We use only the computer name on macOS to match Apple conventions where the
     // app name is featured in the menu bar and the document name is in the title bar.
 #ifdef Q_OS_DARWIN
+#ifdef AURORA_STREAM_RUNTIME
+    std::string windowName = (QStringLiteral("Aurora — ") + m_Computer->name).toUtf8().toStdString();
+#else
     std::string windowName = QString(m_Computer->name).toStdString();
+#endif
 #else
     std::string windowName = QString(m_Computer->name + " - Moonlight").toStdString();
 #endif
@@ -1781,6 +1897,11 @@ void Session::execInternal()
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "SDL_CreateWindow() failed: %s",
                          SDL_GetError());
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+            if (m_AuroraNativeLaunch) {
+                emit displayLaunchError(tr("Aurora couldn’t open the video window."));
+            }
+#endif
 
             delete m_InputHandler;
             m_InputHandler = nullptr;
@@ -1835,6 +1956,12 @@ void Session::execInternal()
 
     m_InputHandler->setWindow(m_Window);
 
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    const bool hasWindowedToolbar = !m_IsFullScreen &&
+        installAuroraSessionToolbar(m_Window, m_Computer->name, SDL_AtomicGet(&m_AuroraConnectionPoor) != 0,
+                                    m_AuroraPrivacy, m_ActiveVideoWidth, m_ActiveVideoHeight);
+#endif
+
     QSvgRenderer svgIconRenderer(QString(":/res/moonlight.svg"));
     QImage svgImage(ICON_SIZE, ICON_SIZE, QImage::Format_RGBA8888);
     svgImage.fill(0);
@@ -1863,6 +1990,11 @@ void Session::execInternal()
     // Enter full screen if requested
     if (m_IsFullScreen) {
         SDL_SetWindowFullscreen(m_Window, m_FullScreenFlag);
+
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+        installAuroraSessionToolbar(m_Window, m_Computer->name, SDL_AtomicGet(&m_AuroraConnectionPoor) != 0,
+                                    m_AuroraPrivacy, m_ActiveVideoWidth, m_ActiveVideoHeight);
+#endif
 
 #ifdef Q_OS_WIN32
         SDL_SysWMinfo info;
@@ -1895,10 +2027,15 @@ void Session::execInternal()
         // Native Wayland: Capture on SDL_WINDOWEVENT_ENTER
         needsFirstEnterCapture = true;
     }
-    else if (!isEmbedded || m_Preferences->absoluteMouseMode) {
-        // Embedded desktop mode tracks the pointer immediately without locking it.
-        // X11/XWayland also activate after decoder creation.
+    else {
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+        // The windowed toolbar lets a click in the video activate capture.
+        needsPostDecoderCreationCapture = !hasWindowedToolbar;
+#else
+        // Embedded desktop mode can start with an unlocked pointer.
+        needsPostDecoderCreationCapture = !isEmbedded || m_Preferences->absoluteMouseMode;
         needsPostDecoderCreationCapture = true;
+#endif
     }
 
     // Stop text input. SDL enables it by default
@@ -1993,6 +2130,34 @@ void Session::execInternal()
 
         case SDL_USEREVENT:
             switch (event.user.code) {
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+            case static_cast<Sint32>(AuroraToolbarAction::Disconnect):
+                if (event.user.windowID == SDL_GetWindowID(m_Window)) {
+                    goto DispatchDeferredCleanup;
+                }
+                break;
+            case static_cast<Sint32>(AuroraToolbarAction::ToggleFullscreen):
+                if (event.user.windowID == SDL_GetWindowID(m_Window)) {
+                    toggleFullscreen();
+                    m_InputHandler->raiseAllKeys();
+                }
+                break;
+            case static_cast<Sint32>(AuroraToolbarAction::ReleaseMouse):
+                if (event.user.windowID == SDL_GetWindowID(m_Window)) {
+                    m_InputHandler->setCaptureActive(false);
+                    m_InputHandler->raiseAllKeys();
+                }
+                break;
+            case static_cast<Sint32>(AuroraToolbarAction::ConnectionQualityChanged):
+                setAuroraSessionToolbarConnectionQuality(m_Window, SDL_AtomicGet(&m_AuroraConnectionPoor) != 0);
+                break;
+            case static_cast<Sint32>(AuroraToolbarAction::ToggleStats):
+                if (event.user.windowID == SDL_GetWindowID(m_Window)) {
+                    m_OverlayManager.setOverlayState(Overlay::OverlayDebug,
+                                                     !m_OverlayManager.isOverlayEnabled(Overlay::OverlayDebug));
+                }
+                break;
+#endif
             case SDL_CODE_FRAME_READY:
                 if (m_VideoDecoder != nullptr) {
                     m_VideoDecoder->renderFrameOnMainThread();
@@ -2238,6 +2403,10 @@ void Session::execInternal()
             m_InputHandler->updatePointerRegionLock();
 
             SDL_AtomicUnlock(&m_DecoderLock);
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+            installAuroraSessionToolbar(m_Window, m_Computer->name,
+                                        SDL_AtomicGet(&m_AuroraConnectionPoor) != 0, m_AuroraPrivacy, m_ActiveVideoWidth, m_ActiveVideoHeight);
+#endif
             break;
 
         case SDL_KEYUP:
@@ -2295,6 +2464,12 @@ void Session::execInternal()
     }
 
 DispatchDeferredCleanup:
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    if (m_AuroraPrivacy) {
+        m_AuroraPrivacy->live = false;
+        m_AuroraPrivacy.reset();
+    }
+#endif
     // Uncapture the mouse and hide the window immediately,
     // so we can return to the Qt GUI ASAP.
     m_InputHandler->setCaptureActive(false);
@@ -2348,6 +2523,9 @@ DispatchDeferredCleanup:
 
     // This must be called after the decoder is deleted, because
     // the renderer may want to interact with the window
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    closeAuroraFullscreenControls(m_Window);
+#endif
 #if defined(Q_OS_WIN32) && defined(AURORA_STREAM_RUNTIME)
     if (isEmbedded) {
         embedded.destroyWindow(m_Window);

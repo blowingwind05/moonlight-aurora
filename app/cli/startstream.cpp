@@ -86,9 +86,13 @@ public:
                     emit q->searchingApp();
                 } else {
                     m_State = StateFailure;
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+                    QString msg = QStringLiteral("请先在 Aurora 中配对 %1，再开始串流。").arg(event.computer->name);
+#else
                     QString msg = QObject::tr("Computer %1 has not been paired. "
                                               "Please open Moonlight to pair before streaming.")
                             .arg(event.computer->name);
+#endif
                     emit q->failed(msg);
                 }
             }

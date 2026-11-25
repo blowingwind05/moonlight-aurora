@@ -62,6 +62,20 @@ void SdlInputHandler::handleMouseButtonEvent(SDL_MouseButtonEvent* event)
             button = BUTTON_RIGHT;
     }
 
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    const Uint32 mask = SDL_BUTTON(button);
+    if (event->state == SDL_PRESSED) {
+        m_RemoteMouseButtons |= mask;
+    }
+    else {
+        // Capture release or focus loss may already have released this button.
+        if (!(m_RemoteMouseButtons & mask)) {
+            return;
+        }
+        m_RemoteMouseButtons &= ~mask;
+    }
+#endif
+
     LiSendMouseButtonEvent(event->state == SDL_PRESSED ?
                                BUTTON_ACTION_PRESS :
                                BUTTON_ACTION_RELEASE,
