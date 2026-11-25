@@ -211,6 +211,12 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
 
     this->pairState = NvHTTP::getXmlString(serverInfo, "PairStatus") == "1" ?
                 PS_PAIRED : PS_NOT_PAIRED;
+#ifdef AURORA_STREAM_RUNTIME
+    if (http.hasPinnedServerInfo() && this->pairState == PS_PAIRED) {
+        this->auroraCaptureSize = QSize(NvHTTP::getXmlString(serverInfo, "AuroraDisplayWidth").toInt(),
+                                       NvHTTP::getXmlString(serverInfo, "AuroraDisplayHeight").toInt());
+    }
+#endif
     this->currentGameId = NvHTTP::getCurrentGame(serverInfo);
     this->appVersion = NvHTTP::getXmlString(serverInfo, "appversion");
     this->gfeVersion = NvHTTP::getXmlString(serverInfo, "GfeVersion");
@@ -595,6 +601,9 @@ bool NvComputer::update(const NvComputer& that)
     ASSIGN_IF_CHANGED(activeHttpsPort);
     ASSIGN_IF_CHANGED(externalPort);
     ASSIGN_IF_CHANGED(pairState);
+#ifdef AURORA_STREAM_RUNTIME
+    ASSIGN_IF_CHANGED(auroraCaptureSize);
+#endif
     ASSIGN_IF_CHANGED(serverCodecModeSupport);
     ASSIGN_IF_CHANGED(currentGameId);
     ASSIGN_IF_CHANGED(activeAddress);

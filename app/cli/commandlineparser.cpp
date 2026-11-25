@@ -453,6 +453,10 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     QRegularExpression resolutionRexExp("^(720|1080|1440|4K|resolution)$");
     QStringList resoOptions = parser.optionNames().filter(resolutionRexExp);
     bool displaySet = !resoOptions.isEmpty();
+#ifdef AURORA_STREAM_RUNTIME
+    preferences->automaticCaptureSize = !displaySet;
+    preferences->automaticCaptureBitrate = !parser.isSet("bitrate");
+#endif
     if (displaySet) {
         QString name = resoOptions.last();
         if (name == "720") {

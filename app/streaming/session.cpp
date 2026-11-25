@@ -1,6 +1,7 @@
 #include "session.h"
 #ifdef AURORA_STREAM_RUNTIME
 #include "aurora-connection-details.h"
+#include "aurora-capture-size.h"
 #endif
 #include "settings/streamingpreferences.h"
 #include "streaming/streamutils.h"
@@ -663,6 +664,22 @@ bool Session::initialize()
     m_StreamConfig.height = m_Preferences->height;
     m_StreamConfig.fps = m_Preferences->fps;
     m_StreamConfig.bitrate = m_Preferences->bitrateKbps;
+#ifdef AURORA_STREAM_RUNTIME
+    QSize captureSize;
+    {
+        QReadLocker locker(&m_Computer->lock);
+        captureSize = auroraStreamCaptureSize(m_Computer->auroraCaptureSize, m_Preferences->automaticCaptureSize);
+    }
+    if (captureSize.isValid()) {
+        m_StreamConfig.width = captureSize.width();
+        m_StreamConfig.height = captureSize.height();
+        if (m_Preferences->automaticCaptureBitrate) {
+            m_StreamConfig.bitrate = StreamingPreferences::getDefaultBitrate(
+                m_StreamConfig.width, m_StreamConfig.height, m_StreamConfig.fps);
+        }
+        qInfo() << "Aurora host capture resolution:" << captureSize;
+    }
+#endif
 
 #ifndef STEAM_LINK
     // Opt-in to all encryption features if we detect that the platform
