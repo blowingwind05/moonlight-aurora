@@ -315,6 +315,50 @@ static int runAuroraBackgroundPair(const PairCommandLineParser& parser)
     return result;
 }
 
+#ifdef AURORA_STREAM_RUNTIME
+static int runAuroraWallpaper(int argc, char** argv)
+{
+    if (argc != 5) {
+        return 2;
+    }
+#ifdef Q_OS_MACOS
+    qputenv("QT_SSL_USE_TEMPORARY_KEYCHAIN", "1");
+#endif
+    QCoreApplication app(argc, argv);
+    const auto args = app.arguments();
+    const QUrl url("http://" + args[2]);
+    const auto port = url.port();
+    const QHostAddress address(url.host());
+    if (!url.isValid() || address.isNull() || port != 48989 || args[3].isEmpty()) {
+        return 2;
+    }
+    const auto revision = args[4] == "-" ? QString() : args[4];
+    if (!revision.isEmpty() && !QRegularExpression("^[A-F0-9]{64}$").match(revision).hasMatch()) {
+        return 2;
+    }
+
+    const auto certificate = ComputerManager::readSavedCertificate(args[3]);
+    if (certificate.isNull()) {
+        return 3;
+    }
+    try {
+        NvHTTP http(NvAddress(address, port), port + DEFAULT_HTTPS_PORT - DEFAULT_HTTP_PORT, certificate, true);
+        const auto preview = http.getAuroraWallpaper(revision);
+        puts(preview.isEmpty() ? "=" : preview.toBase64().constData());
+        fflush(stdout);
+        return 0;
+    }
+    catch (const GfeHttpResponseException& error) {
+        fprintf(stderr, "%s\n", qUtf8Printable(error.toQString()));
+        return 4;
+    }
+    catch (const QtNetworkReplyException& error) {
+        fprintf(stderr, "%s\n", qUtf8Printable(error.toQString()));
+        return 4;
+    }
+}
+#endif
+
 int main(int argc, char *argv[])
 {
 #ifdef AURORA_STREAM_RUNTIME
@@ -347,6 +391,12 @@ int main(int argc, char *argv[])
         // Initialize paths for standard installation
         Path::initialize(false);
     }
+
+#ifdef AURORA_STREAM_RUNTIME
+    if (argc > 1 && std::strcmp(argv[1], "wallpaper") == 0) {
+        return runAuroraWallpaper(argc, argv);
+    }
+#endif
 
     // Override the default QML cache directory with the one we chose
     if (qEnvironmentVariableIsEmpty("QML_DISK_CACHE_PATH")) {

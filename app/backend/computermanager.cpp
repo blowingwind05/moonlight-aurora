@@ -144,6 +144,27 @@ private:
     NvComputer* m_Computer;
 };
 
+QSslCertificate ComputerManager::readSavedCertificate(const QString& uuid)
+{
+    QSettings settings;
+    int hosts = settings.beginReadArray(SER_HOSTS_BACKUP);
+    if (hosts == 0) {
+        settings.endArray();
+        hosts = settings.beginReadArray(SER_HOSTS);
+    }
+    QSslCertificate certificate;
+    for (int index = 0; index < hosts; ++index) {
+        settings.setArrayIndex(index);
+        NvComputer computer(settings);
+        if (computer.uuid.compare(uuid, Qt::CaseInsensitive) == 0) {
+            certificate = computer.serverCert;
+            break;
+        }
+    }
+    settings.endArray();
+    return certificate;
+}
+
 ComputerManager::ComputerManager(StreamingPreferences* prefs, bool syncHostStorage)
     : m_Prefs(prefs),
       m_PollingRef(0),

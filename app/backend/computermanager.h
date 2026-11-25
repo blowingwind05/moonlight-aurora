@@ -242,6 +242,7 @@ public:
     void quitRunningApp(NvComputer* computer);
 
     QVector<NvComputer*> getComputers();
+    static QSslCertificate readSavedCertificate(const QString& uuid);
 
     // computer is deleted inside this call
     void deleteHost(NvComputer* computer);

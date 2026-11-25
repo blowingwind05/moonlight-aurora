@@ -178,6 +178,8 @@ public:
     QImage
     getBoxArt(int appId);
 
+    QByteArray getAuroraWallpaper(const QString& revision);
+
     static
     QVector<NvDisplayMode>
     getDisplayModeList(QString serverInfo);
@@ -193,7 +195,8 @@ private:
                    QString command,
                    QString arguments,
                    int timeoutMs,
-                   NvLogLevel logLevel);
+                   NvLogLevel logLevel,
+                   qint64 maxBytes = 0);
 
     NvAddress m_Address;
     QNetworkAccessManager m_Nam;
