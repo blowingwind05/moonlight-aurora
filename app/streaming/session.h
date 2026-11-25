@@ -11,6 +11,10 @@
 #include "audio/renderers/renderer.h"
 #include "video/overlaymanager.h"
 
+#ifdef AURORA_STREAM_RUNTIME
+#include <atomic>
+#endif
+
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
 #include <memory>
 struct AuroraSessionPrivacy;
@@ -55,6 +59,10 @@ public:
     }
 
     void flushWindowEvents();
+
+#ifdef AURORA_STREAM_RUNTIME
+    bool transportLost() const { return m_TransportLost.load(); }
+#endif
 
 signals:
     void stageStarting(QString stage);
@@ -189,6 +197,9 @@ private:
     QWindow* m_QtWindow;
     bool m_ThreadedExec;
     bool m_UnexpectedTermination;
+#ifdef AURORA_STREAM_RUNTIME
+    std::atomic_bool m_TransportLost{false};
+#endif
     SdlInputHandler* m_InputHandler;
     int m_MouseEmulationRefCount;
     int m_FlushingWindowEventsRef;

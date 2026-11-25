@@ -1,4 +1,6 @@
 #include "aurora-stream.h"
+#include "../AuroraStreamSessionProtocol.h"
+#include "streaming/aurora-connection-details.h"
 #include "startstream.h"
 #include "backend/computermanager.h"
 #include "streaming/aurora-session-toolbar.h"
@@ -365,6 +367,8 @@ static int runConnectionAttempt(QGuiApplication& app, const QString& host, const
             });
             QObject::connect(session, &Session::connectionStarted, &launcher, [&]() {
                 connected = true;
+                std::puts(Aurora::StreamSession::PlaybackReady);
+                std::fflush(stdout);
                 [window hideConnection];
             });
             QObject::connect(session, &Session::sessionFinished, &launcher, [&](int portTestResult) {
@@ -374,10 +378,13 @@ static int runConnectionAttempt(QGuiApplication& app, const QString& host, const
                 }
             });
             QObject::connect(session, &Session::readyForDeletion, &launcher, [&]() {
+                const bool transportLost = session->transportLost();
                 session->deleteLater();
                 session = nullptr;
                 if (cancelled) {
                     app.exit(0);
+                } else if (transportLost) {
+                    app.exit(Aurora::StreamSession::TransportLost);
                 } else if (!sessionError.isEmpty() || !connected) {
                     showFailure(sessionError.isEmpty() ? QStringLiteral("Aurora 未能启动串流。") : sessionError);
                 } else {
@@ -421,6 +428,8 @@ int runAuroraMacStream(QGuiApplication& app, const QString& host, const QString&
 {
     @autoreleasepool {
         app.setApplicationDisplayName(QStringLiteral("Aurora"));
+        if (qEnvironmentVariableIsSet("AURORA_CONNECTION_DETAILS"))
+            AuroraConnectionMonitor::instance().enableParentReporting();
         const auto preferred = qEnvironmentVariable("AURORA_STREAM_DEVICE_NAME").simplified();
         auto* window = [[AuroraConnectWindow alloc] initWithDeviceName:
             preferred.isEmpty() ? @"远程设备" : nativeText(preferred)];

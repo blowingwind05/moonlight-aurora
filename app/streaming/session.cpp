@@ -114,7 +114,12 @@ void Session::clStageFailed(int stage, int errorCode)
 void Session::clConnectionTerminated(int errorCode)
 {
     unsigned int portFlags = LiGetPortFlagsFromTerminationErrorCode(errorCode);
+#ifdef AURORA_STREAM_RUNTIME
+    s_ActiveSession->m_TransportLost.store(errorCode == ML_ERROR_TRANSPORT_LOST);
+    s_ActiveSession->m_PortTestResults = 0;
+#else
     s_ActiveSession->m_PortTestResults = LiTestClientConnectivity(CONN_TEST_SERVER, 443, portFlags);
+#endif
 
     // Display the termination dialog if this was not intended
     switch (errorCode) {

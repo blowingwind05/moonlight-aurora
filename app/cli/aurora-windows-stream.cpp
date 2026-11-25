@@ -2,6 +2,7 @@
 #include <QTimer>
 
 #include "aurora-stream.h"
+#include "../AuroraStreamSessionProtocol.h"
 #include "cli/startstream.h"
 #include "backend/computermanager.h"
 #include "qt-session/AuroraEmbeddedConnectionView.h"
@@ -46,8 +47,12 @@ static void startAuroraEmbeddedStream(QGuiApplication& app, CliStartStream::Laun
             reportSessionFailure(QObject::tr("Starting %1 failed: %2").arg(stage).arg(errorCode));
         });
         QObject::connect(session, &Session::readyForDeletion, &app, [&app, session]() {
-            app.exit(AuroraEmbeddedSession::current().attachmentFailed() ? AuroraEmbeddedSession::AttachmentFailed :
-                     (session->property("auroraLaunchFailed").toBool() ? 1 : 0));
+            if (session->transportLost()) {
+                app.exit(Aurora::StreamSession::TransportLost);
+            } else {
+                app.exit(AuroraEmbeddedSession::current().attachmentFailed() ? AuroraEmbeddedSession::AttachmentFailed :
+                         (session->property("auroraLaunchFailed").toBool() ? 1 : 0));
+            }
         }, Qt::QueuedConnection);
         session->exec(nullptr);
     }, Qt::QueuedConnection);

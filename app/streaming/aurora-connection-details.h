@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <mutex>
 #include <cstdio>
 
@@ -36,15 +37,13 @@ public:
             details.poor = m_Latest.poor;
             m_Latest = details;
         }
-#ifdef Q_OS_WIN32
-        if (m_WriteToParent) {
+        if (m_WriteToParent.load()) {
             std::fprintf(stdout, "aurora-connection/1,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                          details.width, details.height, details.codec, details.fpsHundredths,
                          details.videoKbps, details.lossHundredths, details.decodeMicroseconds,
                          details.roundTripMs, details.poor ? 1 : 0);
             std::fflush(stdout);
         }
-#endif
     }
 
     AuroraConnectionDetails latest()
@@ -53,14 +52,10 @@ public:
         return m_Latest;
     }
 
-#ifdef Q_OS_WIN32
-    void enableParentReporting() { m_WriteToParent = true; }
-#endif
+    void enableParentReporting() { m_WriteToParent.store(true); }
 
 private:
     std::mutex m_Lock;
     AuroraConnectionDetails m_Latest;
-#ifdef Q_OS_WIN32
-    bool m_WriteToParent = false;
-#endif
+    std::atomic_bool m_WriteToParent{false};
 };
