@@ -104,6 +104,11 @@ void Session::clStageFailed(int stage, int errorCode)
     char failingPorts[128];
     LiStringifyPortFlags(portFlags, ", ", failingPorts, sizeof(failingPorts));
     emit s_ActiveSession->stageFailed(QString::fromLocal8Bit(LiGetStageName(stage)), errorCode, QString(failingPorts));
+#ifdef AURORA_STREAM_RUNTIME
+    if (errorCode == LI_ERR_ENCRYPTION_REQUIRED) {
+        emit s_ActiveSession->displayLaunchError(tr("The host must support encrypted streaming."));
+    }
+#endif
 }
 
 void Session::clConnectionTerminated(int errorCode)
@@ -682,7 +687,9 @@ bool Session::initialize()
     }
 #endif
 
-#ifndef STEAM_LINK
+#if defined(AURORA_STREAM_RUNTIME)
+    m_StreamConfig.requireEncryption = true;
+#elif !defined(STEAM_LINK)
     // Opt-in to all encryption features if we detect that the platform
     // has AES cryptography acceleration instructions and more than 2 cores.
     if (StreamUtils::hasFastAes() && SDL_GetCPUCount() > 2) {

@@ -43,6 +43,15 @@ NvHTTP::NvHTTP(NvAddress address, uint16_t httpsPort, QSslCertificate serverCert
     m_Nam.setProxy(noProxy);
 
     connect(&m_Nam, &QNetworkAccessManager::sslErrors, this, &NvHTTP::handleSslErrors);
+    if (m_ExactEndpoint) {
+        // Check the peer before transmitting the request, even if system trust accepts its certificate.
+        connect(&m_Nam, &QNetworkAccessManager::encrypted, this, [this](QNetworkReply* reply) {
+            if (m_ServerCert.isNull() || reply->sslConfiguration().peerCertificate() != m_ServerCert) {
+                reply->setProperty("auroraCertificateMismatch", true);
+                reply->abort();
+            }
+        });
+    }
 }
 
 NvHTTP::NvHTTP(NvComputer* computer) :
@@ -237,6 +246,11 @@ NvHTTP::startApp(QString verb,
                  bool persistGameControllersOnDisconnect,
                  QString& rtspSessionUrl)
 {
+#ifdef AURORA_STREAM_RUNTIME
+    if (streamConfig->requireEncryption && (!m_ExactEndpoint || m_ServerCert.isNull() || !httpsPort())) {
+        throw GfeHttpResponseException(401, "Encrypted streaming requires a verified host certificate");
+    }
+#endif
     int riKeyId;
 
     memcpy(&riKeyId, streamConfig->remoteInputAesIv, sizeof(riKeyId));
@@ -723,6 +737,11 @@ NvHTTP::openConnection(QUrl baseUrl,
     // We must clear out cached authentication and connections or
     // GFE will puke next time
     m_Nam.clearAccessCache();
+
+    if (m_ExactEndpoint && reply->property("auroraCertificateMismatch").toBool()) {
+        delete reply;
+        throw GfeHttpResponseException(401, "Server certificate mismatch");
+    }
 
     if (pairedNotFound && *pairedNotFound) {
         return reply;
