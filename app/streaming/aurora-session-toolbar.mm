@@ -12,6 +12,8 @@
 namespace {
     constexpr CGFloat GroupHeight = 36;
     constexpr CGFloat ButtonHeight = 32;
+    constexpr CGFloat FloatingButtonSize = 40;
+    constexpr CGFloat FloatingButtonInset = 14;
     NSString* const ContextItem = @"AuroraSessionContext";
     NSString* const ActionsItem = @"AuroraSessionActions";
     char ControllerKey;
@@ -191,6 +193,29 @@ namespace {
 }
 @end
 
+@interface AuroraFloatingControlsButton : AuroraToolbarButton
+@end
+
+@implementation AuroraFloatingControlsButton
+- (BOOL)acceptsFirstMouse:(NSEvent*)event { return YES; }
+
+- (void)resetCursorRects
+{
+    [self addCursorRect:self.bounds cursor:NSCursor.arrowCursor];
+}
+
+- (void)drawRect:(NSRect)dirtyRect
+{
+    NSBezierPath* shape = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(self.bounds, 0.5, 0.5)
+                                                         xRadius:13 yRadius:13];
+    [rgb(0xf7f9fd) setFill];
+    [shape fill];
+    [rgb(0xc6d1e0) setStroke];
+    [shape stroke];
+    [super drawRect:dirtyRect];
+}
+@end
+
 @interface AuroraStatusDot : NSView {
 @public
     BOOL poor;
@@ -211,7 +236,8 @@ namespace {
     Uint32 streamWindowId;
     std::shared_ptr<AuroraSessionPrivacy> privacy;
 @private
-    NSWindow* _window;  // Owned by SDL. The native toolbar owns this controller.
+    NSWindow* _window;  // Owned by SDL. The native window retains this controller.
+    NSPanel* _floatingPanel;
     AuroraToolbarGroup* _context;
     AuroraToolbarGroup* _actions;
     NSTextField* _device;
@@ -225,6 +251,7 @@ namespace {
     NSMenu* _controlMenu;
     NSMenuItem* _privacyItem;
     NSMenuItem* _privacyNote;
+    NSMenuItem* _exitFullscreen;
     BOOL _nativeFullscreen;
 }
 - (instancetype)initWithWindow:(NSWindow*)window deviceName:(NSString*)name;
@@ -232,6 +259,8 @@ namespace {
                             code:(AuroraToolbarAction)code warning:(BOOL)warning;
 - (void)resizeItems;
 - (void)showIfWindowed;
+- (void)showFullscreenControls:(BOOL)visible;
+- (void)positionFullscreenControls;
 - (void)updateConnectionQuality:(BOOL)poor;
 - (void)requestPrivacy:(AuroraPrivacyOperation)operation;
 - (void)updatePrivacyMenu;
@@ -239,8 +268,7 @@ namespace {
 
 static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 {
-    NSToolbar* toolbar = window.toolbar;
-    return toolbar ? objc_getAssociatedObject(toolbar, &ControllerKey) : nil;
+    return window ? objc_getAssociatedObject(window, &ControllerKey) : nil;
 }
 
 @implementation AuroraSessionToolbarController
@@ -307,10 +335,19 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     release.target = self;
     release.tag = static_cast<NSInteger>(AuroraToolbarAction::ReleaseMouse);
     release.keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagShift;
+    [_controlMenu addItem:[NSMenuItem separatorItem]];
+    _exitFullscreen = [_controlMenu addItemWithTitle:@"退出全屏" action:@selector(sendMenuAction:) keyEquivalent:@""];
+    _exitFullscreen.target = self;
+    _exitFullscreen.tag = static_cast<NSInteger>(AuroraToolbarAction::ToggleFullscreen);
+    _exitFullscreen.hidden = YES;
+    NSMenuItem* disconnect = [_controlMenu addItemWithTitle:@"断开连接" action:@selector(sendMenuAction:) keyEquivalent:@""];
+    disconnect.target = self;
+    disconnect.tag = static_cast<NSInteger>(AuroraToolbarAction::Disconnect);
 
     NSNotificationCenter* notifications = NSNotificationCenter.defaultCenter;
     [notifications addObserver:self selector:@selector(windowResized:) name:NSWindowDidResizeNotification object:window];
     [notifications addObserver:self selector:@selector(windowWillEnterFullscreen:) name:NSWindowWillEnterFullScreenNotification object:window];
+    [notifications addObserver:self selector:@selector(windowDidEnterFullscreen:) name:NSWindowDidEnterFullScreenNotification object:window];
     [notifications addObserver:self selector:@selector(windowDidExitFullscreen:) name:NSWindowDidExitFullScreenNotification object:window];
     [self resizeItems];
     return self;
@@ -360,8 +397,46 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     }
 }
 
+- (void)positionFullscreenControls
+{
+    const NSRect video = [_window convertRectToScreen:[_window.contentView convertRect:_window.contentView.bounds toView:nil]];
+    [_floatingPanel setFrameOrigin:NSMakePoint(NSMaxX(video) - FloatingButtonSize - FloatingButtonInset,
+                                               NSMaxY(video) - FloatingButtonSize - FloatingButtonInset)];
+}
+
+- (void)showFullscreenControls:(BOOL)visible
+{
+    _exitFullscreen.hidden = !visible;
+    if (!visible) {
+        if (_floatingPanel.parentWindow == _window) [_window removeChildWindow:_floatingPanel];
+        [_floatingPanel orderOut:nil];
+        return;
+    }
+    if (!_floatingPanel) {
+        _floatingPanel = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, FloatingButtonSize, FloatingButtonSize)
+            styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
+              backing:NSBackingStoreBuffered defer:NO];
+        _floatingPanel.opaque = NO;
+        _floatingPanel.backgroundColor = NSColor.clearColor;
+        _floatingPanel.collectionBehavior = NSWindowCollectionBehaviorFullScreenAuxiliary |
+                                              NSWindowCollectionBehaviorIgnoresCycle;
+        _floatingPanel.hasShadow = YES;
+        _floatingPanel.hidesOnDeactivate = YES;
+        _floatingPanel.releasedWhenClosed = NO;
+        auto* button = [[AuroraFloatingControlsButton alloc] initWithLabel:@"控制中心"
+            symbol:@"slider.horizontal.3" target:self action:@selector(showControls:) warning:NO];
+        [button showLabel:NO];
+        button.frame = NSMakeRect(0, 0, FloatingButtonSize, FloatingButtonSize);
+        _floatingPanel.contentView = button;
+        [button release];
+    }
+    [self positionFullscreenControls];
+    if (_floatingPanel.parentWindow != _window) [_window addChildWindow:_floatingPanel ordered:NSWindowAbove];
+}
+
 - (void)windowResized:(NSNotification*)notification
 {
+    if (_floatingPanel.parentWindow == _window) [self positionFullscreenControls];
     if (!_nativeFullscreen && !(_window.styleMask & NSWindowStyleMaskFullScreen)) {
         [self resizeItems];
     }
@@ -373,9 +448,15 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     _window.toolbar.visible = NO;
 }
 
+- (void)windowDidEnterFullscreen:(NSNotification*)notification
+{
+    [self showFullscreenControls:YES];
+}
+
 - (void)windowDidExitFullscreen:(NSNotification*)notification
 {
     _nativeFullscreen = NO;
+    [self showFullscreenControls:NO];
     [self showIfWindowed];
 }
 
@@ -518,6 +599,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     [NSNotificationCenter.defaultCenter removeObserver:self];
     _controlMenu.delegate = nil;
     [_controlMenu release];
+    [_floatingPanel release];
     [_context release];
     [_actions release];
     [super dealloc];
@@ -527,28 +609,35 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 bool installAuroraSessionToolbar(SDL_Window* window, const QString& deviceName, bool connectionPoor,
                                  const std::shared_ptr<AuroraSessionPrivacy>& privacy)
 {
-    if (![NSThread isMainThread] || !window || (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN)) {
-        return false;
+    if (![NSThread isMainThread] || !window) return false;
+    NSWindow* native = nativeWindow(window);
+    if (!native) return false;
+
+    const BOOL fullscreen = (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) ||
+                            (native.styleMask & NSWindowStyleMaskFullScreen);
+    if (!fullscreen && (!(native.styleMask & NSWindowStyleMaskTitled) ||
+                        (native.styleMask & NSWindowStyleMaskFullSizeContentView))) return false;
+
+    auto* controller = auroraToolbar(native);
+    if (!controller) {
+        const auto utf8 = deviceName.toUtf8();
+        NSString* name = [NSString stringWithUTF8String:utf8.constData()];
+        controller = [[AuroraSessionToolbarController alloc] initWithWindow:native
+            deviceName:name.length ? name : @"远程设备"];
+        controller->streamWindowId = SDL_GetWindowID(window);
+        controller->privacy = privacy;
+        objc_setAssociatedObject(native, &ControllerKey, controller, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [controller release];
+        [controller updateConnectionQuality:connectionPoor];
+        [controller updatePrivacyMenu];
     }
 
-    NSWindow* native = nativeWindow(window);
-    if (!native || !(native.styleMask & NSWindowStyleMaskTitled) ||
-        (native.styleMask & (NSWindowStyleMaskFullSizeContentView | NSWindowStyleMaskFullScreen))) {
-        return false;
-    }
-    if (auto* controller = auroraToolbar(native)) {
+    [controller showFullscreenControls:fullscreen];
+    if (fullscreen) return false;
+    if (native.toolbar.delegate == controller) {
         [controller showIfWindowed];
         return true;
     }
-
-    const auto utf8 = deviceName.toUtf8();
-    NSString* name = [NSString stringWithUTF8String:utf8.constData()];
-    auto* controller = [[AuroraSessionToolbarController alloc] initWithWindow:native
-        deviceName:name.length ? name : @"远程设备"];
-    controller->streamWindowId = SDL_GetWindowID(window);
-    controller->privacy = privacy;
-    [controller updateConnectionQuality:connectionPoor];
-    [controller updatePrivacyMenu];
 
     // AppKit lays out the real traffic lights and the titlebar. Keep SDL's
     // content view as-is, below the bar, with the same video content size.
@@ -564,7 +653,6 @@ bool installAuroraSessionToolbar(SDL_Window* window, const QString& deviceName, 
     toolbar.displayMode = NSToolbarDisplayModeIconOnly;
     toolbar.allowsUserCustomization = NO;
     toolbar.autosavesConfiguration = NO;
-    objc_setAssociatedObject(toolbar, &ControllerKey, controller, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     toolbar.delegate = controller;
     native.toolbar = toolbar;
     [toolbar release];
@@ -581,7 +669,6 @@ bool installAuroraSessionToolbar(SDL_Window* window, const QString& deviceName, 
     if (privacy && !privacy->lastStatusCheck.isValid()) {
         [controller requestPrivacy:AuroraPrivacyOperation::Status];
     }
-    [controller release];
     return true;
 }
 
@@ -591,6 +678,11 @@ void hideAuroraSessionToolbar(SDL_Window* window)
     if (auroraToolbar(native) && native.toolbar.visible) {
         native.toolbar.visible = NO;
     }
+}
+
+void closeAuroraFullscreenControls(SDL_Window* window)
+{
+    [auroraToolbar(nativeWindow(window)) showFullscreenControls:NO];
 }
 
 void setAuroraSessionToolbarConnectionQuality(SDL_Window* window, bool poor)

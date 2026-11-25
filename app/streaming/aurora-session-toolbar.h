@@ -19,4 +19,5 @@ enum class AuroraToolbarAction : Sint32 {
 bool installAuroraSessionToolbar(SDL_Window* window, const QString& deviceName, bool connectionPoor,
                                  const std::shared_ptr<AuroraSessionPrivacy>& privacy);
 void hideAuroraSessionToolbar(SDL_Window* window);
+void closeAuroraFullscreenControls(SDL_Window* window);
 void setAuroraSessionToolbarConnectionQuality(SDL_Window* window, bool poor);

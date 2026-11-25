@@ -1341,10 +1341,9 @@ void Session::toggleFullscreen()
     // Actually enter/leave fullscreen
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
     if (!fullScreen) hideAuroraSessionToolbar(m_Window);
-    if (SDL_SetWindowFullscreen(m_Window, fullScreen ? m_FullScreenFlag : 0) != 0 && !fullScreen) {
-        installAuroraSessionToolbar(m_Window, m_Computer->name, SDL_AtomicGet(&m_AuroraConnectionPoor) != 0,
-                                    m_AuroraPrivacy);
-    }
+    SDL_SetWindowFullscreen(m_Window, fullScreen ? m_FullScreenFlag : 0);
+    installAuroraSessionToolbar(m_Window, m_Computer->name, SDL_AtomicGet(&m_AuroraConnectionPoor) != 0,
+                                m_AuroraPrivacy);
 #else
     SDL_SetWindowFullscreen(m_Window, fullScreen ? m_FullScreenFlag : 0);
 #endif
@@ -1844,6 +1843,11 @@ void Session::execInternal()
     // Enter full screen if requested
     if (m_IsFullScreen) {
         SDL_SetWindowFullscreen(m_Window, m_FullScreenFlag);
+
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+        installAuroraSessionToolbar(m_Window, m_Computer->name, SDL_AtomicGet(&m_AuroraConnectionPoor) != 0,
+                                    m_AuroraPrivacy);
+#endif
 
 #ifdef Q_OS_WIN32
         SDL_SysWMinfo info;
@@ -2346,6 +2350,9 @@ DispatchDeferredCleanup:
 
     // This must be called after the decoder is deleted, because
     // the renderer may want to interact with the window
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    closeAuroraFullscreenControls(m_Window);
+#endif
     SDL_DestroyWindow(m_Window);
 
     if (iconSurface != nullptr) {
