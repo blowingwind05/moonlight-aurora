@@ -5,11 +5,14 @@
 #include "aurora-session-privacy.h"
 
 #import <AppKit/AppKit.h>
+#import <QuartzCore/QuartzCore.h>
 #import <CoreFoundation/CoreFoundation.h>
 #import <objc/runtime.h>
 #include <SDL_syswm.h>
 #include <QThreadPool>
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 namespace {
     constexpr CGFloat GroupHeight = 44;
@@ -18,6 +21,7 @@ namespace {
     constexpr CGFloat ButtonHeight = 32;
     constexpr CGFloat FloatingButtonSize = 40;
     constexpr CGFloat FloatingButtonInset = 14;
+    NSString* const ControlCenterSymbol = @"AuroraSessionControlCenter";
     NSString* const ContextItem = @"AuroraSessionContext";
     NSString* const ActionsItem = @"AuroraSessionActions";
     char ControllerKey;
@@ -27,6 +31,30 @@ namespace {
         return [NSColor colorWithSRGBRed:((color >> 16) & 0xff) / 255.0
                                    green:((color >> 8) & 0xff) / 255.0
                                     blue:(color & 0xff) / 255.0 alpha:1];
+    }
+
+    NSImage* controlCenterImage()
+    {
+        auto* icon = [NSImage imageWithSize:NSMakeSize(24, 24) flipped:YES drawingHandler:^BOOL(NSRect bounds) {
+            auto* lines = [NSBezierPath bezierPath];
+            [lines moveToPoint:NSMakePoint(3, 7)];
+            [lines lineToPoint:NSMakePoint(5.5, 7)];
+            [lines moveToPoint:NSMakePoint(10.5, 7)];
+            [lines lineToPoint:NSMakePoint(21, 7)];
+            [lines moveToPoint:NSMakePoint(3, 17)];
+            [lines lineToPoint:NSMakePoint(13.5, 17)];
+            [lines moveToPoint:NSMakePoint(18.5, 17)];
+            [lines lineToPoint:NSMakePoint(21, 17)];
+            [lines appendBezierPathWithOvalInRect:NSMakeRect(5.5, 4.5, 5, 5)];
+            [lines appendBezierPathWithOvalInRect:NSMakeRect(13.5, 14.5, 5, 5)];
+            lines.lineWidth = 1.75;
+            lines.lineCapStyle = NSRoundLineCapStyle;
+            [NSColor.blackColor setStroke];
+            [lines stroke];
+            return YES;
+        }];
+        [icon setTemplate:YES];
+        return icon;
     }
 
     NSWindow* nativeWindow(SDL_Window* window)
@@ -89,11 +117,18 @@ namespace {
     BOOL _warning;
     BOOL _menuOpen;
     BOOL _showsLabel;
+    BOOL _menuRow;
+    BOOL _option;
+    BOOL _selectedOption;
+    NSImageView* _nextArrow;
 }
 - (instancetype)initWithLabel:(NSString*)label symbol:(NSString*)symbol
                        target:(id)target action:(SEL)action warning:(BOOL)warning;
 - (void)showLabel:(BOOL)show;
 - (void)markMenuOpen:(BOOL)open;
+- (void)useMenuLayout:(BOOL)next;
+- (void)useOptionStyle:(BOOL)selected;
+- (void)selectOption:(BOOL)selected;
 @end
 
 @implementation AuroraToolbarButton
@@ -115,9 +150,13 @@ namespace {
 
         _glyph = [[[NSImageView alloc] initWithFrame:NSZeroRect] autorelease];
         _glyph.imageScaling = NSImageScaleProportionallyDown;
-        NSImage* image = [NSImage imageWithSystemSymbolName:symbol accessibilityDescription:nil];
-        _glyph.image = [image imageWithSymbolConfiguration:[NSImageSymbolConfiguration
-            configurationWithPointSize:15 weight:NSFontWeightRegular]];
+        if ([symbol isEqualToString:ControlCenterSymbol]) {
+            _glyph.image = controlCenterImage();
+        } else if (symbol.length > 0) {
+            NSImage* image = [NSImage imageWithSystemSymbolName:symbol accessibilityDescription:nil];
+            _glyph.image = [image imageWithSymbolConfiguration:[NSImageSymbolConfiguration
+                configurationWithPointSize:15 weight:NSFontWeightRegular]];
+        }
         [_glyph setAccessibilityElement:NO];
         [self addSubview:_glyph];
 
@@ -156,9 +195,17 @@ namespace {
     const CGFloat maxLabelWidth = std::max<CGFloat>(0, NSWidth(self.bounds) - iconSize - spacing - 4);
     const CGFloat labelWidth = _showsLabel ? std::min(std::ceil(captionSize.width), maxLabelWidth) : 0;
     const CGFloat rowWidth = iconSize + (labelWidth > 0 ? spacing + labelWidth : 0);
-    const CGFloat left = std::floor((NSWidth(self.bounds) - rowWidth) / 2);
+    const CGFloat left = _menuRow ? 8 : std::floor((NSWidth(self.bounds) - rowWidth) / 2);
+    _nextArrow.frame = NSMakeRect(NSWidth(self.bounds) - 19, NSMidY(self.bounds) - 6, 12, 12);
     const CGFloat middle = NSMidY(self.bounds);
     _glyph.frame = NSMakeRect(left, middle - iconSize / 2, iconSize, iconSize);
+    if (_option) {
+        _glyph.hidden = YES;
+        _caption.frame = self.bounds;
+        const CGFloat height = std::ceil(captionSize.height);
+        _caption.frame = NSMakeRect(0, std::floor(middle - height / 2), NSWidth(self.bounds), height);
+        return;
+    }
     const CGFloat captionHeight = std::ceil(captionSize.height);
     _caption.frame = NSMakeRect(left + iconSize + spacing, std::floor(middle - captionHeight / 2),
                                 labelWidth, captionHeight);
@@ -203,9 +250,43 @@ namespace {
     self.needsDisplay = YES;
 }
 
+- (void)useMenuLayout:(BOOL)next
+{
+    _menuRow = YES;
+    _caption.font = [NSFont systemFontOfSize:13];
+    if (next) {
+        _nextArrow = [[[NSImageView alloc] initWithFrame:NSZeroRect] autorelease];
+        _nextArrow.image = [[NSImage imageWithSystemSymbolName:@"chevron.right" accessibilityDescription:nil]
+            imageWithSymbolConfiguration:[NSImageSymbolConfiguration configurationWithPointSize:9 weight:NSFontWeightRegular]];
+        _nextArrow.contentTintColor = rgb(0x526176);
+        [_nextArrow setAccessibilityElement:NO];
+        [self addSubview:_nextArrow];
+    }
+    self.needsLayout = YES;
+}
+
+- (void)useOptionStyle:(BOOL)selected
+{
+    _option = YES;
+    _caption.alignment = NSTextAlignmentCenter;
+    [self selectOption:selected];
+    self.needsLayout = YES;
+}
+
+- (void)selectOption:(BOOL)selected
+{
+    _selectedOption = selected;
+    _caption.textColor = rgb(!self.enabled ? 0x8390a1 : selected ? 0x2350b4 : 0x19283f);
+    self.needsDisplay = YES;
+}
+
 - (void)drawRect:(NSRect)dirtyRect
 {
-    if (self.enabled && (_hover || _menuOpen || self.cell.highlighted)) {
+    if (_option) {
+        [rgb(_selectedOption ? 0xe2e7ef : _hover ? 0xe8edf4 : 0xf4f6fa) setFill];
+        [[NSBezierPath bezierPathWithRoundedRect:self.bounds xRadius:6 yRadius:6] fill];
+    }
+    if (!_option && self.enabled && (_hover || _menuOpen || self.cell.highlighted)) {
         const unsigned color = _warning ? 0xfbe7e8 :
             (_menuOpen || self.cell.highlighted) ? 0xe2e7ef : 0xe8edf4;
         [rgb(color) setFill];
@@ -346,7 +427,21 @@ namespace {
 - (BOOL)mouseDownCanMoveWindow { return NO; }
 @end
 
-@interface AuroraSessionToolbarController : NSObject <NSToolbarDelegate, NSMenuDelegate, NSPopoverDelegate> {
+@interface AuroraControlPageView : NSView
+@end
+
+@implementation AuroraControlPageView
+- (BOOL)isFlipped { return YES; }
+@end
+
+@interface AuroraControlPanel : NSPanel
+@end
+
+@implementation AuroraControlPanel
+- (BOOL)canBecomeKeyWindow { return YES; }
+@end
+
+@interface AuroraSessionToolbarController : NSObject <NSToolbarDelegate, NSPopoverDelegate> {
 @public
     Uint32 streamWindowId;
     std::shared_ptr<AuroraSessionPrivacy> privacy;
@@ -360,7 +455,6 @@ namespace {
     NSImageView* _statusChevron;
     NSPopover* _connectionDetails;
     NSTimer* _connectionRefresh;
-    NSMenuItem* _fullscreenDetailsItem;
     AuroraStatusDot* _dot;
     NSTextField* _statusText;
     AuroraDisplayTab* _display;
@@ -368,10 +462,13 @@ namespace {
     AuroraToolbarButton* _controls;
     AuroraToolbarButton* _disconnect;
     NSImageView* _brand;
-    NSMenu* _controlMenu;
-    NSMenuItem* _privacyItem;
-    NSMenuItem* _privacyNote;
-    NSMenuItem* _exitFullscreen;
+    AuroraControlPanel* _controlCenter;
+    AuroraToolbarButton* _controlAnchor;
+    id _controlMonitor;
+    NSMutableDictionary<NSString*, NSString*>* _preferences;
+    NSTextField* _bitrateLabel;
+    NSInteger _controlPage;
+    BOOL _showFloatingControls;
     BOOL _nativeFullscreen;
     NSSize _videoAspect;
 }
@@ -391,6 +488,8 @@ namespace {
 - (void)updateConnectionQuality:(BOOL)poor;
 - (void)requestPrivacy:(AuroraPrivacyOperation)operation;
 - (void)updatePrivacyMenu;
+- (void)closeControlCenter;
+- (void)positionControlCenter;
 @end
 
 static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
@@ -438,7 +537,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     _display = [[[AuroraDisplayTab alloc] init] autorelease];
     [_context addSubview:_display];
 
-    _controls = [self addButton:@"控制中心" symbol:@"slider.horizontal.3" action:@selector(showControls:)
+    _controls = [self addButton:@"控制中心" symbol:ControlCenterSymbol action:@selector(showControls:)
                             code:AuroraToolbarAction::ReleaseMouse warning:NO];
     _disconnect = [self addButton:connecting ? @"取消" : @"断开"
                            symbol:connecting ? @"xmark" : @"rectangle.portrait.and.arrow.right"
@@ -455,35 +554,18 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
         [_actions addSubview:_brand];
     }
 
-    _controlMenu = [[NSMenu alloc] initWithTitle:@"控制中心"];
-    _controlMenu.minimumWidth = 224;
-    _controlMenu.autoenablesItems = NO;
-    _controlMenu.delegate = self;
-    _privacyItem = [[NSMenuItem alloc] initWithTitle:@"隐私保护" action:@selector(togglePrivacy:) keyEquivalent:@""];
-    _privacyItem.target = self;
-    [_controlMenu addItem:_privacyItem];
-    [_privacyItem release];
-    _privacyNote = [[NSMenuItem alloc] initWithTitle:@"" action:nullptr keyEquivalent:@""];
-    _privacyNote.enabled = NO;
-    [_controlMenu addItem:_privacyNote];
-    [_privacyNote release];
-    [_controlMenu addItem:[NSMenuItem separatorItem]];
-    _fullscreenDetailsItem = [_controlMenu addItemWithTitle:@"连接详情" action:@selector(showConnectionDetails:) keyEquivalent:@""];
-    _fullscreenDetailsItem.target = self;
-    _fullscreenDetailsItem.hidden = YES;
-    NSMenuItem* release = [_controlMenu addItemWithTitle:@"释放鼠标" action:@selector(sendMenuAction:) keyEquivalent:@"z"];
-    release.target = self;
-    release.tag = static_cast<NSInteger>(AuroraToolbarAction::ReleaseMouse);
-    release.keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagShift;
-    [_controlMenu addItem:[NSMenuItem separatorItem]];
-    _exitFullscreen = [_controlMenu addItemWithTitle:@"全屏" action:@selector(sendMenuAction:) keyEquivalent:@""];
-    _exitFullscreen.target = self;
-    _exitFullscreen.tag = static_cast<NSInteger>(AuroraToolbarAction::ToggleFullscreen);
-    NSMenuItem* disconnect = [_controlMenu addItemWithTitle:@"断开连接" action:@selector(sendMenuAction:) keyEquivalent:@""];
-    disconnect.target = self;
-    disconnect.tag = static_cast<NSInteger>(AuroraToolbarAction::Disconnect);
+    if (!connecting) {
+        NSString* json = NSProcessInfo.processInfo.environment[@"AURORA_STREAM_PREFERENCES"];
+        if (json.length > 0) {
+            id settings = [NSJSONSerialization JSONObjectWithData:[json dataUsingEncoding:NSUTF8StringEncoding]
+                                                         options:NSJSONReadingMutableContainers error:nullptr];
+            if ([settings isKindOfClass:NSMutableDictionary.class]) _preferences = [settings retain];
+        }
+    }
 
     NSNotificationCenter* notifications = NSNotificationCenter.defaultCenter;
+    [notifications addObserver:self selector:@selector(dismissControlCenter:) name:NSApplicationDidResignActiveNotification object:nil];
+    [notifications addObserver:self selector:@selector(dismissControlCenter:) name:NSWindowWillCloseNotification object:window];
     [notifications addObserver:self selector:@selector(windowResized:) name:NSWindowDidResizeNotification object:window];
     [notifications addObserver:self selector:@selector(windowWillEnterFullscreen:) name:NSWindowWillEnterFullScreenNotification object:window];
     [notifications addObserver:self selector:@selector(windowDidEnterFullscreen:) name:NSWindowDidEnterFullScreenNotification object:window];
@@ -587,8 +669,8 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 
 - (void)showFullscreenControls:(BOOL)visible
 {
-    _exitFullscreen.title = visible ? @"退出全屏" : @"全屏";
-    _fullscreenDetailsItem.hidden = !visible;
+    if (_showFloatingControls != visible) [self closeControlCenter];
+    _showFloatingControls = visible;
     if (!visible) {
         if (_floatingPanel.parentWindow == _window) [_window removeChildWindow:_floatingPanel];
         [_floatingPanel orderOut:nil];
@@ -606,7 +688,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
         _floatingPanel.hidesOnDeactivate = YES;
         _floatingPanel.releasedWhenClosed = NO;
         auto* button = [[AuroraFloatingControlsButton alloc] initWithLabel:@"控制中心"
-            symbol:@"slider.horizontal.3" target:self action:@selector(showControls:) warning:NO];
+            symbol:ControlCenterSymbol target:self action:@selector(showControls:) warning:NO];
         [button showLabel:NO];
         button.frame = NSMakeRect(0, 0, FloatingButtonSize, FloatingButtonSize);
         _floatingPanel.contentView = button;
@@ -619,6 +701,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 - (void)windowResized:(NSNotification*)notification
 {
     if (_floatingPanel.parentWindow == _window) [self positionFullscreenControls];
+    if (_controlCenter.visible) [self positionControlCenter];
     if (!_nativeFullscreen && !(_window.styleMask & NSWindowStyleMaskFullScreen)) {
         [self resizeItems];
     }
@@ -691,22 +774,331 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     sendAction(streamWindowId, static_cast<AuroraToolbarAction>(sender.tag));
 }
 
-- (void)sendMenuAction:(NSMenuItem*)sender
+
+- (AuroraToolbarButton*)controlRow:(NSString*)title symbol:(NSString*)symbol
+                              y:(CGFloat)y action:(SEL)action tag:(NSInteger)tag next:(BOOL)next
 {
-    sendAction(streamWindowId, static_cast<AuroraToolbarAction>(sender.tag));
+    auto* button = [[[AuroraToolbarButton alloc] initWithLabel:title symbol:symbol
+        target:self action:action warning:NO] autorelease];
+    button.tag = tag;
+    button.frame = NSMakeRect(0, y, 274, 34);
+    [button useMenuLayout:next];
+    return button;
+}
+
+- (void)renderControlCenter
+{
+    if (!_controlCenter) return;
+    constexpr CGFloat width = 288;
+    NSView* root = _controlCenter.contentView;
+    _bitrateLabel = nil;
+    root.subviews = @[];
+    auto* body = [[[AuroraControlPageView alloc] initWithFrame:NSMakeRect(0, 0, 274, 0)] autorelease];
+    CGFloat y = 0;
+    auto row = [&](NSString* title, NSString* symbol, SEL action, NSInteger tag, BOOL next = NO) {
+        [body addSubview:[self controlRow:title symbol:symbol y:y action:action tag:tag next:next]];
+        y += 34;
+    };
+    auto label = [&](NSString* text, BOOL muted = NO) {
+        auto* field = [NSTextField labelWithString:text];
+        field.textColor = rgb(muted ? 0x526176 : 0x19283f);
+        field.font = [NSFont systemFontOfSize:muted ? 12 : 13];
+        field.frame = NSMakeRect(8, y + 4, 258, 18);
+        [body addSubview:field];
+        y += 25;
+        return field;
+    };
+    auto choice = [&](NSString* title, NSString* key, NSArray<NSString*>* labels, NSArray<NSString*>* values) {
+        label(title);
+        auto* group = [[[NSView alloc] initWithFrame:NSMakeRect(8, y, 258, 26)] autorelease];
+        group.identifier = key;
+        [group setAccessibilityLabel:title];
+        const CGFloat gap = 4;
+        const CGFloat units = labels.count + ([key isEqualToString:@"resolution"] ? 0.9 : 0);
+        const CGFloat unit = (258 - gap * (labels.count - 1)) / units;
+        CGFloat x = 0;
+        for (NSUInteger index = 0; index < labels.count; index++) {
+            const CGFloat buttonWidth = unit * ((index == 0 && units > labels.count) ? 1.9 : 1);
+            auto* button = [[[AuroraToolbarButton alloc] initWithLabel:labels[index] symbol:@""
+                target:self action:@selector(changeControlChoice:) warning:NO] autorelease];
+            button.frame = NSMakeRect(x, 0, buttonWidth, 26);
+            button.identifier = values[index];
+            button.enabled = _preferences != nil;
+            [button useOptionStyle:[values[index] isEqualToString:_preferences[key]]];
+            [group addSubview:button];
+            x += buttonWidth + gap;
+        }
+        [body addSubview:group];
+        y += 32;
+    };
+    auto toggle = [&](NSString* title, NSString* key, BOOL invert = NO) {
+        auto* field = [NSTextField labelWithString:title];
+        field.font = [NSFont systemFontOfSize:13];
+        field.textColor = rgb(0x19283f);
+        field.frame = NSMakeRect(8, y + 7, 190, 18);
+        [body addSubview:field];
+        auto* button = [[[NSSwitch alloc] initWithFrame:NSMakeRect(221, y + 4, 45, 23)] autorelease];
+        button.controlSize = NSControlSizeSmall;
+        button.identifier = key;
+        button.state = ([_preferences[key] isEqualToString:@"on"] != invert) ? NSControlStateValueOn : NSControlStateValueOff;
+        button.target = self;
+        button.action = @selector(changeControlSwitch:);
+        button.enabled = _preferences != nil;
+        [button setAccessibilityLabel:title];
+        [body addSubview:button];
+        y += 31;
+    };
+
+    NSArray<NSString*>* titles = @[@"画质", @"声音", @"输入", @"安全"];
+    NSArray<NSString*>* icons = @[@"display", @"speaker.wave.2", @"computermouse", @"shield"];
+    if (_controlPage == 0) {
+        for (NSUInteger index = 0; index < titles.count; index++) {
+            row(titles[index], icons[index], @selector(openControlPage:), index + 1, YES);
+        }
+        auto* divider = [[[NSBox alloc] initWithFrame:NSMakeRect(0, y + 5, 274, 1)] autorelease];
+        divider.boxType = NSBoxSeparator;
+        [body addSubview:divider];
+        y += 11;
+        if (_showFloatingControls) {
+            row(@"连接详情", @"info.circle", @selector(showFullscreenDetails:), 0);
+            row(@"断开连接", @"rectangle.portrait.and.arrow.right", @selector(runControlAction:),
+                static_cast<NSInteger>(AuroraToolbarAction::Disconnect));
+        }
+        row(_showFloatingControls ? @"退出全屏" : @"全屏", @"arrow.up.left.and.arrow.down.right",
+            @selector(runControlAction:), static_cast<NSInteger>(AuroraToolbarAction::ToggleFullscreen));
+    } else {
+        row(titles[_controlPage - 1], @"arrow.left", @selector(openControlPage:), 0);
+        if (_controlPage != 4) {
+            auto* note = [NSTextField labelWithString:@"下次连接生效"];
+            note.font = [NSFont systemFontOfSize:11];
+            note.textColor = rgb(0x526176);
+            note.frame = NSMakeRect(167, 9, 99, 18);
+            note.alignment = NSTextAlignmentRight;
+            [body addSubview:note];
+        }
+        switch (_controlPage) {
+        case 1: {
+            choice(@"分辨率", @"resolution", @[@"跟随被控端", @"720p", @"1080p", @"1440p", @"4K"],
+                   @[@"host", @"1280x720", @"1920x1080", @"2560x1440", @"3840x2160"]);
+            choice(@"帧率", @"fps", @[@"30 FPS", @"60 FPS"], @[@"30", @"60"]);
+            auto* bitrateTitle = label(@"视频码率");
+            auto* value = [NSTextField labelWithString:[NSString stringWithFormat:@"%.1f Mbps", [_preferences[@"bitrate"] doubleValue] / 1000.0]];
+            value.font = [NSFont systemFontOfSize:12];
+            value.textColor = rgb(0x526176);
+            value.alignment = NSTextAlignmentRight;
+            value.frame = NSMakeRect(160, NSMinY(bitrateTitle.frame), 106, 18);
+            [body addSubview:value];
+            auto* rate = [NSSlider sliderWithValue:[_preferences[@"bitrate"] doubleValue] / 1000.0 minValue:0.5
+                maxValue:150 target:self action:@selector(changeControlBitrate:)];
+            rate.frame = NSMakeRect(8, y, 258, 25);
+            rate.continuous = NO;
+            rate.enabled = _preferences != nil;
+            [rate setAccessibilityLabel:@"视频码率（Mbps）"];
+            [body addSubview:rate];
+            _bitrateLabel = value;
+            y += 29;
+            choice(@"视频编码", @"video-codec", @[@"自动", @"H.264", @"HEVC", @"AV1"], @[@"auto", @"H.264", @"HEVC", @"AV1"]);
+            toggle(@"HDR", @"hdr");
+            toggle(@"性能统计", @"performance-overlay");
+            break;
+        }
+        case 2:
+            choice(@"音频配置", @"audio-config", @[@"立体声", @"5.1 环绕声", @"7.1 环绕声"],
+                   @[@"stereo", @"5.1-surround", @"7.1-surround"]);
+            toggle(@"远端扬声器静音", @"audio-on-host", YES);
+            toggle(@"失焦静音", @"mute-on-focus-loss");
+            break;
+        case 3:
+            choice(@"鼠标模式", @"absolute-mouse", @[@"桌面指针", @"锁定鼠标"], @[@"on", @"off"]);
+            toggle(@"交换鼠标左右键", @"mouse-buttons-swap");
+            toggle(@"反转滚轮", @"reverse-scroll-direction");
+            row(@"释放当前鼠标", @"computermouse", @selector(runControlAction:),
+                static_cast<NSInteger>(AuroraToolbarAction::ReleaseMouse));
+            break;
+        case 4: {
+            label(@"隐私屏保");
+            const bool hasTarget = privacy && privacy->live && !privacy->target.program.isEmpty();
+            const auto state = hasTarget ? privacy->state : AuroraPrivacyState::Unavailable;
+            const bool busy = hasTarget && privacy->busy;
+            if (busy) label(@"正在确认隐私屏保状态…", YES);
+            else if (state == AuroraPrivacyState::Unavailable) label(@"当前会话不支持隐私屏保", YES);
+            else if (privacy->changeRejected) label(@"主机未切换到所选状态", YES);
+            else if (state == AuroraPrivacyState::Error) label(@"无法确认隐私屏保状态", YES);
+            else if (state == AuroraPrivacyState::On) label(@"隐私屏保已开启", YES);
+            else if (state == AuroraPrivacyState::Off) label(@"隐私屏保已关闭", YES);
+            if (hasTarget && state != AuroraPrivacyState::Unavailable) {
+                row(state == AuroraPrivacyState::On ? @"关闭隐私屏保" : state == AuroraPrivacyState::Off
+                    ? @"开启隐私屏保" : @"重新检查", @"shield", @selector(togglePrivacy:), 0);
+                ((NSButton*)body.subviews.lastObject).enabled = !busy;
+            }
+            break;
+        }
+        }
+    }
+
+    CGFloat available = NSHeight(_window.contentView.bounds) - 32;
+    if (_window.screen) available = std::min(available, NSHeight(_window.screen.visibleFrame) - 100);
+    const CGFloat height = std::min(y + 12, std::max(CGFloat(124), available));
+    body.frame = NSMakeRect(0, 0, 274, y);
+    auto* scroll = [[[NSScrollView alloc] initWithFrame:NSMakeRect(6, 6, width - 12, height - 12)] autorelease];
+    scroll.drawsBackground = NO;
+    scroll.hasVerticalScroller = y > height - 12;
+    scroll.scrollerStyle = NSScrollerStyleOverlay;
+    scroll.documentView = body;
+    [_controlCenter setContentSize:NSMakeSize(width, height)];
+    [root addSubview:scroll];
+    [scroll.contentView scrollToPoint:NSZeroPoint];
+    if (_controlCenter.visible) {
+        [self positionControlCenter];
+        [_controlCenter makeFirstResponder:body.subviews.firstObject];
+    }
+}
+
+- (void)openControlPage:(NSButton*)button
+{
+    _controlPage = button.tag;
+    [self renderControlCenter];
+    if (_controlPage == 4 && privacy &&
+        (!privacy->lastStatusCheck.isValid() || privacy->lastStatusCheck.hasExpired(3000))) {
+        [self requestPrivacy:AuroraPrivacyOperation::Status];
+    }
+}
+
+- (void)runControlAction:(NSButton*)button
+{
+    auto action = static_cast<AuroraToolbarAction>(button.tag);
+    [self closeControlCenter];
+    sendAction(streamWindowId, action);
+}
+
+- (void)showFullscreenDetails:(id)sender
+{
+    [self closeControlCenter];
+    [self showConnectionDetails:sender];
+}
+
+- (void)positionControlCenter
+{
+    if (!_controlAnchor.window) return;
+    const NSRect windowFrame = _window.frame;
+    const NSRect button = [_controlAnchor.window convertRectToScreen:[_controlAnchor convertRect:_controlAnchor.bounds toView:nil]];
+    const NSRect screen = (_window.screen ?: NSScreen.mainScreen).visibleFrame;
+    const NSSize size = _controlCenter.frame.size;
+    const CGFloat right = NSWidth(windowFrame) < 530 ? NSMaxX(windowFrame) - 8 : NSMaxX(button);
+    const CGFloat top = _showFloatingControls ? NSMinY(button) - 4 :
+        NSMaxY([_window convertRectToScreen:_window.contentLayoutRect]);
+    const CGFloat x = std::clamp(right - size.width, NSMinX(screen) + 6, NSMaxX(screen) - size.width - 6);
+    const CGFloat y = std::clamp(top - size.height, NSMinY(screen) + 6, NSMaxY(screen) - size.height - 6);
+    [_controlCenter setFrameOrigin:NSMakePoint(x, y)];
+}
+
+- (void)closeControlCenter
+{
+    if (_controlMonitor) [NSEvent removeMonitor:_controlMonitor];
+    _controlMonitor = nil;
+    if (_controlCenter.parentWindow == _window) [_window removeChildWindow:_controlCenter];
+    [_controlCenter orderOut:nil];
+    [_controlAnchor markMenuOpen:NO];
+    _controlAnchor = nil;
+}
+
+- (void)dismissControlCenter:(NSNotification*)notification
+{
+    [self closeControlCenter];
 }
 
 - (void)showControls:(AuroraToolbarButton*)sender
 {
+    if (_controlCenter.visible) {
+        [self closeControlCenter];
+        return;
+    }
     [self closeConnectionDetails];
+    sendAction(streamWindowId, AuroraToolbarAction::ReleaseMouse);
+    _controlAnchor = sender;
+    _controlPage = 0;
+    if (!_controlCenter) {
+        _controlCenter = [[AuroraControlPanel alloc] initWithContentRect:NSMakeRect(0, 0, 288, 193)
+            styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:NO];
+        _controlCenter.opaque = NO;
+        _controlCenter.backgroundColor = NSColor.clearColor;
+        _controlCenter.hasShadow = YES;
+        _controlCenter.hidesOnDeactivate = YES;
+        _controlCenter.releasedWhenClosed = NO;
+        _controlCenter.collectionBehavior = NSWindowCollectionBehaviorFullScreenAuxiliary |
+                                             NSWindowCollectionBehaviorIgnoresCycle;
+        _controlCenter.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
+        NSView* frame = _controlCenter.contentView;
+        frame.wantsLayer = YES;
+        frame.layer.backgroundColor = NSColor.whiteColor.CGColor;
+        frame.layer.borderColor = rgb(0xd7dfec).CGColor;
+        frame.layer.borderWidth = 1;
+        frame.layer.cornerRadius = 9;
+        frame.layer.masksToBounds = YES;
+    }
+    [self renderControlCenter];
+    [self positionControlCenter];
     [sender markMenuOpen:YES];
-    [_controlMenu popUpMenuPositioningItem:nil atLocation:NSMakePoint(
-        NSWidth(sender.bounds) - _controlMenu.minimumWidth, NSMinY(sender.bounds)) inView:sender];
-    [sender markMenuOpen:NO];
+    [_window addChildWindow:_controlCenter ordered:NSWindowAbove];
+    [_controlCenter makeKeyAndOrderFront:nil];
+    [_controlCenter selectNextKeyView:nil];
+
+    __block AuroraSessionToolbarController* controller = self;
+    _controlMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:
+        NSEventMaskKeyDown | NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown handler:^NSEvent*(NSEvent* event) {
+        if (event.type != NSEventTypeKeyDown) {
+            if (event.window == controller->_controlCenter) return event;
+            AuroraToolbarButton* trigger = controller->_controlAnchor;
+            if (event.window == trigger.window &&
+                NSPointInRect([trigger convertPoint:event.locationInWindow fromView:nil], trigger.bounds)) return event;
+            [controller closeControlCenter];
+            return event;
+        }
+        if (event.keyCode != 53 || event.window != controller->_controlCenter) return event;
+        if (controller->_controlPage == 0) {
+            auto* anchorButton = controller->_controlAnchor;
+            [controller closeControlCenter];
+            [controller->_window makeKeyWindow];
+            [anchorButton.window makeFirstResponder:anchorButton];
+        } else {
+            controller->_controlPage = 0;
+            [controller renderControlCenter];
+        }
+        return nil;
+    }];
+}
+
+- (void)saveControlValue:(NSString*)value forKey:(NSString*)key
+{
+    if (!key || !value || !_preferences || [_preferences[key] isEqualToString:value]) return;
+    _preferences[key] = value;
+    std::fprintf(stdout, "aurora-stream-setting/1\t%s\t%s\n", key.UTF8String, value.UTF8String);
+    std::fflush(stdout);
+}
+
+- (void)changeControlChoice:(AuroraToolbarButton*)sender
+{
+    [self saveControlValue:sender.identifier forKey:sender.superview.identifier];
+    for (AuroraToolbarButton* option in sender.superview.subviews) [option selectOption:option == sender];
+}
+
+- (void)changeControlSwitch:(NSSwitch*)sender
+{
+    BOOL enabled = (sender.state == NSControlStateValueOn) != ([sender.identifier isEqualToString:@"audio-on-host"]);
+    [self saveControlValue:enabled ? @"on" : @"off" forKey:sender.identifier];
+}
+
+- (void)changeControlBitrate:(NSSlider*)sender
+{
+    const long halfMbps = std::lround(sender.doubleValue * 2);
+    sender.doubleValue = halfMbps / 2.0;
+    [self saveControlValue:[NSString stringWithFormat:@"%ld", halfMbps * 500] forKey:@"bitrate"];
+    _bitrateLabel.stringValue = [NSString stringWithFormat:@"%.1f Mbps", sender.doubleValue];
 }
 
 - (void)showConnectionDetails:(id)sender
 {
+    [self closeControlCenter];
     if (_connectionDetails.shown) {
         [self closeConnectionDetails];
         return;
@@ -791,24 +1183,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 
 - (void)updatePrivacyMenu
 {
-    const bool hasTarget = privacy && privacy->live && !privacy->target.program.isEmpty();
-    const auto state = hasTarget ? privacy->state : AuroraPrivacyState::Unavailable;
-    const bool busy = hasTarget && privacy->busy;
-    _privacyItem.enabled = !busy && (state == AuroraPrivacyState::On || state == AuroraPrivacyState::Off);
-    _privacyItem.state = !busy && state == AuroraPrivacyState::On ? NSControlStateValueOn : NSControlStateValueOff;
-
-    NSString* note = nil;
-    if (busy || state == AuroraPrivacyState::Unknown) {
-        note = @"正在确认隐私保护状态…";
-    } else if (state == AuroraPrivacyState::Unavailable) {
-        note = @"此连接不支持隐私保护";
-    } else if (state == AuroraPrivacyState::Error) {
-        note = @"无法确认主机状态，重新打开控制中心以重试";
-    } else if (privacy->changeRejected) {
-        note = @"主机未切换到所选状态";
-    }
-    _privacyNote.title = note ?: @"";
-    _privacyNote.hidden = note == nil;
+    if (_controlCenter.visible && _controlPage == 4) [self renderControlCenter];
 }
 
 - (void)requestPrivacy:(AuroraPrivacyOperation)operation
@@ -853,29 +1228,20 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     });
 }
 
-- (void)menuWillOpen:(NSMenu*)menu
-{
-    [self updatePrivacyMenu];
-    if (privacy && (!privacy->lastStatusCheck.isValid() || privacy->lastStatusCheck.hasExpired(3000))) {
-        [self requestPrivacy:AuroraPrivacyOperation::Status];
-    }
-}
-
-- (void)togglePrivacy:(NSMenuItem*)sender
+- (void)togglePrivacy:(NSButton*)sender
 {
     if (!privacy || privacy->busy) return;
-    if (privacy->state == AuroraPrivacyState::On) {
-        [self requestPrivacy:AuroraPrivacyOperation::Disable];
-    } else if (privacy->state == AuroraPrivacyState::Off) {
-        [self requestPrivacy:AuroraPrivacyOperation::Enable];
-    }
+    const auto operation = privacy->state == AuroraPrivacyState::On ? AuroraPrivacyOperation::Disable :
+        privacy->state == AuroraPrivacyState::Off ? AuroraPrivacyOperation::Enable : AuroraPrivacyOperation::Status;
+    [self requestPrivacy:operation];
 }
 
 - (void)dealloc
 {
     [NSNotificationCenter.defaultCenter removeObserver:self];
-    _controlMenu.delegate = nil;
-    [_controlMenu release];
+    [self closeControlCenter];
+    [_controlCenter release];
+    [_preferences release];
     _connectionDetails.delegate = nil;
     [self closeConnectionDetails];
     [_connectionDetails release];
