@@ -14,6 +14,10 @@
 #include <QRegularExpression>
 #include <QTimer>
 
+#ifdef AURORA_STREAM_RUNTIME
+#include "AuroraStreamEntry.h"
+#endif
+
 // Don't let SDL hook our main function, since Qt is already
 // doing the same thing. This needs to be before any headers
 // that might include SDL.h themselves.
@@ -313,6 +317,12 @@ static int runAuroraBackgroundPair(const PairCommandLineParser& parser)
 
 int main(int argc, char *argv[])
 {
+#ifdef AURORA_STREAM_RUNTIME
+    const int invocation = prepareAuroraStreamInvocation(argc, argv);
+    if (invocation >= 0) {
+        return invocation;
+    }
+#endif
     SDL_SetMainReady();
 
     // Set the app version for the QCommandLineParser's showVersion() command
