@@ -196,6 +196,14 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
         this->remoteAddress = NvAddress();
     }
 
+    if (NvHTTP::gameStreamRelayBase(http.address()) != 0) {
+        // The active route belongs to this process. Persist the real UUID and
+        // certificate without saving loopback or the addresses seen by the relay host.
+        this->activeHttpsPort = http.httpsPort();
+        this->localAddress = NvAddress();
+        this->remoteAddress = NvAddress();
+    }
+
     // Real Nvidia host software (GeForce Experience and RTX Experience) both use the 'Mjolnir'
     // codename in the state field and no version of Sunshine does. We can use this to bypass
     // some assumptions about Nvidia hardware that don't apply to Sunshine hosts.

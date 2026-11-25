@@ -150,6 +150,9 @@ public:
 
     QSslCertificate serverCert();
 
+    static NvAddress gameStreamRelayAddress();
+    static uint16_t gameStreamRelayBase(const NvAddress& address);
+
     uint16_t httpPort();
 
     uint16_t httpsPort();

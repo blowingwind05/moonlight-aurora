@@ -828,7 +828,8 @@ private:
             if (!m_Mdns) {
                 unsigned int portTestResult;
 
-                if (m_ComputerManager->m_Prefs->detectNetworkBlocking) {
+                if (NvHTTP::gameStreamRelayBase(m_Address) == 0 &&
+                    m_ComputerManager->m_Prefs->detectNetworkBlocking) {
                     // We failed to connect to the specified PC. Let's test to make sure this network
                     // isn't blocking Moonlight, so we can tell the user about it.
                     portTestResult = LiTestClientConnectivity("qt.conntest.moonlight-stream.org", 443,
@@ -913,7 +914,7 @@ private:
                 newComputer->ipv6Address = m_MdnsIpv6Address;
             }
         }
-        else {
+        else if (NvHTTP::gameStreamRelayBase(m_Address) == 0) {
             newComputer->manualAddress = m_Address;
         }
 

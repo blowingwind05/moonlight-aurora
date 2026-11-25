@@ -1449,7 +1449,8 @@ bool Session::startConnectionAsync()
     QByteArray hostnameStr = m_Computer->activeAddress.address().toLatin1();
     QByteArray siAppVersion = m_Computer->appVersion.toLatin1();
 
-    SERVER_INFORMATION hostInfo;
+    SERVER_INFORMATION hostInfo = {};
+    hostInfo.auroraRelayBasePort = NvHTTP::gameStreamRelayBase(m_Computer->activeAddress);
     hostInfo.address = hostnameStr.data();
     hostInfo.serverInfoAppVersion = siAppVersion.data();
     hostInfo.serverCodecModeSupport = m_Computer->serverCodecModeSupport;
@@ -1470,7 +1471,13 @@ bool Session::startConnectionAsync()
         hostInfo.rtspSessionUrl = rtspSessionUrlStr.data();
     }
 
-    if (m_Preferences->packetSize != 0) {
+    if (hostInfo.auroraRelayBasePort != 0) {
+        // Loopback hides the overlay MTU from the normal reachability test.
+        m_StreamConfig.streamingRemotely = STREAM_CFG_REMOTE;
+        m_StreamConfig.packetSize = m_Preferences->packetSize > 0 ?
+                qMin(m_Preferences->packetSize, 1024) : 1024;
+    }
+    else if (m_Preferences->packetSize != 0) {
         // Override default packet size and remote streaming detection
         // NB: Using STREAM_CFG_AUTO will cap our packet size at 1024 for remote hosts.
         m_StreamConfig.streamingRemotely = STREAM_CFG_LOCAL;

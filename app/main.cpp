@@ -333,6 +333,10 @@ static int runAuroraBackgroundPair(const PairCommandLineParser& parser)
     IdentityManager::get();
     ComputerManager manager(StreamingPreferences::get(), true);
     const auto address = parser.getAuroraPairAddress();
+    if (!NvHTTP::gameStreamRelayAddress().isNull() && NvHTTP::gameStreamRelayBase(address) == 0) {
+        fputs("Aurora pairing address does not match its GameStream relay.\n", stderr);
+        return 1;
+    }
     CliPair::Launcher launcher(address.toString(), parser.getPredefinedPin(), nullptr,
                                QStringLiteral("aurora-") + parser.getAuroraPairId(), address);
 
@@ -377,7 +381,16 @@ static int runAuroraWallpaper(int argc, char** argv)
     const QUrl url("http://" + args[2]);
     const auto port = url.port();
     const QHostAddress address(url.host());
-    if (!url.isValid() || address.isNull() || port != 48989 || args[3].isEmpty()) {
+    if (!url.isValid() || address.isNull() || port <= 5 || port > 65535 || args[3].isEmpty()) {
+        return 2;
+    }
+    const NvAddress target(address, static_cast<uint16_t>(port));
+    const auto relay = NvHTTP::gameStreamRelayAddress();
+    const auto relayHostKey = "AURORA_GAMESTREAM_HOST_UUID";
+    const bool validEndpoint = relay.isNull()
+        ? port == 48989 && !qEnvironmentVariableIsSet(relayHostKey)
+        : target == relay && args[3].compare(qEnvironmentVariable(relayHostKey), Qt::CaseInsensitive) == 0;
+    if (!validEndpoint) {
         return 2;
     }
     const auto revision = args[4] == "-" ? QString() : args[4];
@@ -390,7 +403,7 @@ static int runAuroraWallpaper(int argc, char** argv)
         return 3;
     }
     try {
-        NvHTTP http(NvAddress(address, port), port + DEFAULT_HTTPS_PORT - DEFAULT_HTTP_PORT, certificate, true);
+        NvHTTP http(target, port + DEFAULT_HTTPS_PORT - DEFAULT_HTTP_PORT, certificate, true);
         const auto preview = http.getAuroraWallpaper(revision);
         puts(preview.isEmpty() ? "=" : preview.toBase64().constData());
         fflush(stdout);

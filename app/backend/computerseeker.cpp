@@ -1,5 +1,6 @@
 #include "computerseeker.h"
 #include "computermanager.h"
+#include "nvhttp.h"
 #include <QPointer>
 #include <QTimer>
 
@@ -9,7 +10,7 @@ ComputerSeeker::ComputerSeeker(ComputerManager *manager, QString computerName, Q
 {
     // If we know this computer, send a WOL packet to wake it up in case it is asleep.
     for (NvComputer * computer: m_ComputerManager->getComputers()) {
-        if (this->matchComputer(computer)) {
+        if (NvHTTP::gameStreamRelayAddress().isNull() && this->matchComputer(computer)) {
             computer->wake();
         }
     }
@@ -24,6 +25,12 @@ ComputerSeeker::ComputerSeeker(ComputerManager *manager, QString computerName, Q
 void ComputerSeeker::start(int timeout)
 {
     m_TimeoutTimer->start(timeout);
+    const auto relayAddress = NvHTTP::gameStreamRelayAddress();
+    if (!relayAddress.isNull()) {
+        m_ComputerManager->addNewHostManually(relayAddress.toString());
+        return;
+    }
+
     // Seek desired computer by both connecting to it directly (this may fail
     // if m_ComputerName is UUID, or the name that doesn't resolve to an IP
     // address) and by polling it using mDNS, hopefully one of these methods
@@ -38,7 +45,9 @@ void ComputerSeeker::onComputerUpdated(NvComputer *computer)
         return;
     }
     if (matchComputer(computer) && isOnline(computer)) {
-        m_ComputerManager->stopPollingAsync();
+        if (NvHTTP::gameStreamRelayAddress().isNull()) {
+            m_ComputerManager->stopPollingAsync();
+        }
         m_TimeoutTimer->stop();
         if (m_LoadApps) {
             QPointer<ComputerSeeker> self(this);
@@ -51,6 +60,11 @@ void ComputerSeeker::onComputerUpdated(NvComputer *computer)
 
 bool ComputerSeeker::matchComputer(NvComputer *computer) const
 {
+    const auto relayAddress = NvHTTP::gameStreamRelayAddress();
+    if (!relayAddress.isNull()) {
+        return computer->activeAddress == relayAddress &&
+               computer->uuid == qEnvironmentVariable("AURORA_GAMESTREAM_HOST_UUID");
+    }
     QString value = m_ComputerName.toLower();
 
     if (computer->name.toLower() == value || computer->uuid.toLower() == value) {
@@ -74,6 +88,8 @@ bool ComputerSeeker::isOnline(NvComputer *computer) const
 void ComputerSeeker::onTimeout()
 {
     m_TimeoutTimer->stop();
-    m_ComputerManager->stopPollingAsync();
+    if (NvHTTP::gameStreamRelayAddress().isNull()) {
+        m_ComputerManager->stopPollingAsync();
+    }
     emit errorTimeout();
 }
