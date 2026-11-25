@@ -384,6 +384,11 @@ win32:!winrt {
 macx {
     message(VideoToolbox renderer selected)
 
+    contains(DEFINES, AURORA_STREAM_RUNTIME) {
+        SOURCES += streaming/aurora-session-toolbar.mm
+        HEADERS += streaming/aurora-session-toolbar.h
+    }
+
     SOURCES += \
         streaming/video/ffmpeg-renderers/vt_avsamplelayer.mm \
         streaming/video/ffmpeg-renderers/vt_metal.mm

@@ -121,6 +121,11 @@ public:
     QString getUnmappedGamepads();
 
 private:
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    void raiseAllMouseButtons();
+    Uint32 m_RemoteMouseButtons = 0;
+#endif
+
     enum KeyCombo {
         KeyComboQuit,
         KeyComboUngrabInput,

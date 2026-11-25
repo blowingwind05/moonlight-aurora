@@ -283,6 +283,18 @@ void SdlInputHandler::notifyMouseLeave()
     }
 }
 
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+void SdlInputHandler::raiseAllMouseButtons()
+{
+    for (int button = BUTTON_LEFT; button <= BUTTON_X2; ++button) {
+        if (m_RemoteMouseButtons & SDL_BUTTON(button)) {
+            LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, button);
+        }
+    }
+    m_RemoteMouseButtons = 0;
+}
+#endif
+
 void SdlInputHandler::notifyFocusLost()
 {
     // Release mouse cursor when another window is activated (e.g. by using ALT+TAB).
@@ -292,6 +304,10 @@ void SdlInputHandler::notifyFocusLost()
     if (!(SDL_GetWindowFlags(m_Window) & SDL_WINDOW_FULLSCREEN) && !m_AbsoluteMouseMode) {
         setCaptureActive(false);
     }
+
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    raiseAllMouseButtons();
+#endif
 
     // Raise all keys that are currently pressed. If we don't do this, certain keys
     // used in shortcuts that cause focus loss (such as Alt+Tab) may get stuck down.
@@ -399,6 +415,12 @@ void SdlInputHandler::setCaptureActive(bool active)
         }
     }
     else {
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+        raiseAllMouseButtons();
+        SDL_CaptureMouse(SDL_FALSE);
+        m_PendingMouseButtonsAllUpOnVideoRegionLeave = false;
+        m_MouseWasInVideoRegion = false;
+#endif
         if (m_FakeCaptureActive) {
             // Display the cursor again
             SDL_ShowCursor(SDL_ENABLE);

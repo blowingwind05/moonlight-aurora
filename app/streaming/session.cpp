@@ -7,6 +7,10 @@
 #include <SDL.h>
 #include "utils.h"
 
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+#include "aurora-session-toolbar.h"
+#endif
+
 #ifdef HAVE_FFMPEG
 #include "video/ffmpeg.h"
 #endif
@@ -1663,7 +1667,11 @@ void Session::execInternal()
     // We use only the computer name on macOS to match Apple conventions where the
     // app name is featured in the menu bar and the document name is in the title bar.
 #ifdef Q_OS_DARWIN
+#ifdef AURORA_STREAM_RUNTIME
+    std::string windowName = (QStringLiteral("Aurora — ") + m_Computer->name).toUtf8().toStdString();
+#else
     std::string windowName = QString(m_Computer->name).toStdString();
+#endif
 #else
     std::string windowName = QString(m_Computer->name + " - Moonlight").toStdString();
 #endif
@@ -1743,6 +1751,10 @@ void Session::execInternal()
 
     m_InputHandler->setWindow(m_Window);
 
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    const bool hasWindowedToolbar = !m_IsFullScreen && installAuroraSessionToolbar(m_Window);
+#endif
+
     QSvgRenderer svgIconRenderer(QString(":/res/moonlight.svg"));
     QImage svgImage(ICON_SIZE, ICON_SIZE, QImage::Format_RGBA8888);
     svgImage.fill(0);
@@ -1805,7 +1817,13 @@ void Session::execInternal()
     }
     else {
         // X11/XWayland: Capture after decoder creation
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+        // Start with a usable pointer in the windowed viewer. A click in the
+        // video uses Moonlight's existing capture path.
+        needsPostDecoderCreationCapture = !hasWindowedToolbar;
+#else
         needsPostDecoderCreationCapture = true;
+#endif
     }
 
     // Stop text input. SDL enables it by default
@@ -1884,6 +1902,25 @@ void Session::execInternal()
 
         case SDL_USEREVENT:
             switch (event.user.code) {
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+            case static_cast<Sint32>(AuroraToolbarAction::Disconnect):
+                if (event.user.windowID == SDL_GetWindowID(m_Window)) {
+                    goto DispatchDeferredCleanup;
+                }
+                break;
+            case static_cast<Sint32>(AuroraToolbarAction::ToggleFullscreen):
+                if (event.user.windowID == SDL_GetWindowID(m_Window)) {
+                    toggleFullscreen();
+                    m_InputHandler->raiseAllKeys();
+                }
+                break;
+            case static_cast<Sint32>(AuroraToolbarAction::ToggleStats):
+                if (event.user.windowID == SDL_GetWindowID(m_Window)) {
+                    m_OverlayManager.setOverlayState(Overlay::OverlayDebug,
+                                                     !m_OverlayManager.isOverlayEnabled(Overlay::OverlayDebug));
+                }
+                break;
+#endif
             case SDL_CODE_FRAME_READY:
                 if (m_VideoDecoder != nullptr) {
                     m_VideoDecoder->renderFrameOnMainThread();
@@ -2119,6 +2156,9 @@ void Session::execInternal()
             m_InputHandler->updatePointerRegionLock();
 
             SDL_AtomicUnlock(&m_DecoderLock);
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+            installAuroraSessionToolbar(m_Window);
+#endif
             break;
 
         case SDL_KEYUP:
