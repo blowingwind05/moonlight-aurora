@@ -3,6 +3,7 @@
 #include "aurora-connection-details.h"
 #include <vector>
 #include "aurora-session-privacy.h"
+#include "../backend/aurora-bitrate.h"
 
 #import <AppKit/AppKit.h>
 #import <QuartzCore/QuartzCore.h>
@@ -25,6 +26,8 @@ namespace {
     NSString* const ContextItem = @"AuroraSessionContext";
     NSString* const ActionsItem = @"AuroraSessionActions";
     char ControllerKey;
+
+    enum class BitrateMode { Unchecked, SavedOnly, Live, Retry };
 
     NSColor* rgb(unsigned color)
     {
@@ -485,6 +488,15 @@ namespace {
     id _controlMonitor;
     NSMutableDictionary<NSString*, NSString*>* _preferences;
     NSTextField* _bitrateLabel;
+    NSTextField* _bitrateFeedback;
+    NSSlider* _bitrateSlider;
+    BitrateMode _bitrateMode;
+    bool _bitrateBusy;
+    QByteArray _bitrateSession;
+    quint32 _bitrateRevision;
+    int _bitrateRequestedKbps;
+    int _bitrateEncoderKbps;
+    int _bitrateMaximumKbps;
     NSInteger _controlPage;
     BOOL _showFloatingControls;
     BOOL _nativeFullscreen;
@@ -506,6 +518,9 @@ namespace {
 - (void)updateConnectionQuality:(BOOL)poor;
 - (void)requestPrivacy:(AuroraPrivacyOperation)operation;
 - (void)updatePrivacyMenu;
+- (void)updateBitrateControls;
+- (void)requestBitrate:(const AuroraBitrate::Request&)request;
+- (void)finishBitrateRequest:(const AuroraBitrate::Request&)request reply:(const QByteArray&)reply;
 - (void)closeControlCenter;
 - (void)positionControlCenter;
 @end
@@ -811,6 +826,8 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     constexpr CGFloat width = 288;
     NSView* root = _controlCenter.contentView;
     _bitrateLabel = nil;
+    _bitrateFeedback = nil;
+    _bitrateSlider = nil;
     root.subviews = @[];
     auto* body = [[[AuroraControlPageView alloc] initWithFrame:NSMakeRect(0, 0, 274, 0)] autorelease];
     CGFloat y = 0;
@@ -901,21 +918,23 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
                    @[@"host", @"1280x720", @"1920x1080", @"2560x1440", @"3840x2160"]);
             choice(@"帧率", @"fps", @[@"30 FPS", @"60 FPS"], @[@"30", @"60"]);
             auto* bitrateTitle = label(@"视频码率");
-            auto* value = [NSTextField labelWithString:[NSString stringWithFormat:@"%.1f Mbps", [_preferences[@"bitrate"] doubleValue] / 1000.0]];
+            auto* value = [NSTextField labelWithString:@""];
             value.font = [NSFont systemFontOfSize:12];
             value.textColor = rgb(0x526176);
             value.alignment = NSTextAlignmentRight;
             value.frame = NSMakeRect(160, NSMinY(bitrateTitle.frame), 106, 18);
             [body addSubview:value];
-            auto* rate = [NSSlider sliderWithValue:[_preferences[@"bitrate"] doubleValue] / 1000.0 minValue:0.5
+            auto* rate = [NSSlider sliderWithValue:0.5 minValue:0.5
                 maxValue:150 target:self action:@selector(changeControlBitrate:)];
             rate.frame = NSMakeRect(8, y, 258, 25);
             rate.continuous = NO;
-            rate.enabled = _preferences != nil;
             [rate setAccessibilityLabel:@"视频码率（Mbps）"];
             [body addSubview:rate];
             _bitrateLabel = value;
+            _bitrateSlider = rate;
             y += 29;
+            _bitrateFeedback = label(@"", YES);
+            [self updateBitrateControls];
             choice(@"视频编码", @"video-codec", @[@"自动", @"H.264", @"HEVC", @"AV1"], @[@"auto", @"H.264", @"HEVC", @"AV1"]);
             toggle(@"HDR", @"hdr");
             toggle(@"性能统计", @"performance-overlay");
@@ -977,6 +996,9 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 {
     _controlPage = button.tag;
     [self renderControlCenter];
+    if (_controlPage == 1 && (_bitrateMode == BitrateMode::Unchecked || _bitrateMode == BitrateMode::Retry)) {
+        [self requestBitrate:AuroraBitrate::Request{}];
+    }
     if (_controlPage == 4 && privacy &&
         (!privacy->lastStatusCheck.isValid() || privacy->lastStatusCheck.hasExpired(3000))) {
         [self requestPrivacy:AuroraPrivacyOperation::Status];
@@ -1109,10 +1131,106 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 
 - (void)changeControlBitrate:(NSSlider*)sender
 {
-    const long halfMbps = std::lround(sender.doubleValue * 2);
-    sender.doubleValue = halfMbps / 2.0;
-    [self saveControlValue:[NSString stringWithFormat:@"%ld", halfMbps * 500] forKey:@"bitrate"];
-    _bitrateLabel.stringValue = [NSString stringWithFormat:@"%.1f Mbps", sender.doubleValue];
+    if (sender != _bitrateSlider || !sender.enabled || _bitrateBusy || !privacy || !privacy->live) return;
+
+    const int kbps = static_cast<int>(std::lround(sender.doubleValue * 2)) * 500;
+    if (_bitrateMode == BitrateMode::Live) {
+        const int requested = sender.doubleValue >= sender.maxValue ?
+            _bitrateMaximumKbps : std::min(kbps, _bitrateMaximumKbps);
+        if (requested != _bitrateRequestedKbps) {
+            [self requestBitrate:AuroraBitrate::Request{_bitrateSession, QByteArray::number(requested), _bitrateRevision}];
+        } else {
+            [self updateBitrateControls];
+        }
+    } else if (_bitrateMode == BitrateMode::SavedOnly) {
+        [self saveControlValue:[NSString stringWithFormat:@"%d", kbps] forKey:@"bitrate"];
+        [self updateBitrateControls];
+    }
+}
+
+- (void)updateBitrateControls
+{
+    if (!_bitrateSlider) return;
+
+    const int requested = _bitrateRequestedKbps ? _bitrateRequestedKbps : [_preferences[@"bitrate"] intValue];
+    const int maximum = _bitrateMaximumKbps ? _bitrateMaximumKbps : AuroraBitrate::MaxKbps;
+    _bitrateSlider.maxValue = maximum / 1000.0;
+    _bitrateSlider.doubleValue = requested / 1000.0;
+    _bitrateSlider.enabled = !_bitrateBusy && (_bitrateMode == BitrateMode::Live ||
+        (_bitrateMode == BitrateMode::SavedOnly && _preferences));
+    _bitrateLabel.stringValue = requested > 0 ? [NSString stringWithFormat:@"%.1f Mbps", requested / 1000.0] : @"—";
+
+    if (_bitrateBusy || _bitrateMode == BitrateMode::Unchecked) {
+        _bitrateFeedback.stringValue = _bitrateMode == BitrateMode::Live ? @"正在应用实时码率…" : @"正在查询实时码率…";
+    } else if (_bitrateMode == BitrateMode::Live) {
+        _bitrateFeedback.stringValue = [NSString stringWithFormat:@"实时编码器：%d kbps", _bitrateEncoderKbps];
+    } else if (_bitrateMode == BitrateMode::SavedOnly) {
+        _bitrateFeedback.stringValue = @"此项下次连接生效";
+    } else {
+        _bitrateFeedback.stringValue = @"未确认实时码率，重新打开画质页查询";
+    }
+}
+
+- (void)requestBitrate:(const AuroraBitrate::Request&)request
+{
+    if (_bitrateBusy || !privacy || !privacy->live) return;
+    if (privacy->target.program.isEmpty()) {
+        _bitrateMode = BitrateMode::SavedOnly;
+        [self updateBitrateControls];
+        return;
+    }
+
+    _bitrateBusy = true;
+    [self updateBitrateControls];
+    const std::weak_ptr<AuroraSessionPrivacy> weak(privacy);
+    const auto windowId = streamWindowId;
+    QThreadPool::globalInstance()->start([weak, windowId, request]() {
+        const auto session = weak.lock();
+        if (!session || !session->live) return;
+
+        const auto reply = runAuroraBitrateCommand(session->target, request, session->live);
+        if (!session->live) return;
+
+        const auto mainLoop = CFRunLoopGetMain();
+        CFRunLoopPerformBlock(mainLoop, kCFRunLoopCommonModes, ^{
+            const auto current = weak.lock();
+            if (!current || !current->live) return;
+            auto* toolbar = auroraToolbar(nativeWindow(SDL_GetWindowFromID(windowId)));
+            if (toolbar && toolbar->privacy == current) {
+                [toolbar finishBitrateRequest:request reply:reply];
+            }
+        });
+        CFRunLoopWakeUp(mainLoop);
+    });
+}
+
+- (void)finishBitrateRequest:(const AuroraBitrate::Request&)request reply:(const QByteArray&)reply
+{
+    _bitrateBusy = false;
+    AuroraBitrate::Confirmation confirmed;
+    // Keep a status retry bound to the same server session token.
+    if (AuroraBitrate::parseConfirmation(request, reply, confirmed) && (_bitrateSession.isEmpty() ||
+            (confirmed.session == _bitrateSession && confirmed.revision >= _bitrateRevision))) {
+        _bitrateMode = BitrateMode::Live;
+        _bitrateSession = confirmed.session;
+        _bitrateRevision = confirmed.revision;
+        _bitrateRequestedKbps = confirmed.requestedKbps;
+        _bitrateEncoderKbps = confirmed.encoderKbps;
+        _bitrateMaximumKbps = confirmed.maximumKbps;
+        if (request.setting()) {
+            [self saveControlValue:[NSString stringWithFormat:@"%d", _bitrateRequestedKbps] forKey:@"bitrate"];
+        }
+    } else if (reply == "unsupported" && !request.setting()) {
+        _bitrateMode = BitrateMode::SavedOnly;
+    } else {
+        _bitrateMode = BitrateMode::Retry;
+    }
+    if (_controlCenter.visible && _controlPage == 1) {
+        [self updateBitrateControls];
+        if (request.setting() && _bitrateMode == BitrateMode::Retry) {
+            [self requestBitrate:AuroraBitrate::Request{}];
+        }
+    }
 }
 
 - (void)showConnectionDetails:(id)sender

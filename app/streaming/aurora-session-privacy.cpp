@@ -1,5 +1,6 @@
 #include "aurora-session-privacy.h"
 #include "../AuroraStreamEntry.h"
+#include "../backend/aurora-bitrate.h"
 #include "../backend/nvaddress.h"
 
 #include <QCoreApplication>
@@ -9,6 +10,7 @@
 #include <QHostAddress>
 #include <QProcess>
 #include <QRegularExpression>
+#include <QStringList>
 #include <QTimer>
 
 AuroraPrivacyTarget makeAuroraPrivacyTarget(const NvAddress& address, int httpsPort,
@@ -46,27 +48,21 @@ AuroraPrivacyTarget makeAuroraPrivacyTarget(const NvAddress& address, int httpsP
     return {program, QDir::currentPath(), NvAddress(host, address.port()).toString(), uuid, environment};
 }
 
-AuroraPrivacyState runAuroraPrivacyCommand(const AuroraPrivacyTarget& target, AuroraPrivacyOperation operation,
-                                          const std::atomic<bool>& live)
+static QByteArray runAuroraSessionCommand(const AuroraPrivacyTarget& target, const QString& command,
+                                          const QStringList& options, int maxOutput, const std::atomic<bool>& live)
 {
     if (!live || target.program.isEmpty()) {
-        return AuroraPrivacyState::Unavailable;
+        return {};
     }
 
-    const char* verb = "status";
-    switch (operation) {
-    case AuroraPrivacyOperation::Status: break;
-    case AuroraPrivacyOperation::Enable: verb = "on"; break;
-    case AuroraPrivacyOperation::Disable: verb = "off"; break;
-    }
     QProcess child;
     child.setProgram(target.program);
     child.setWorkingDirectory(target.workingDirectory);
     child.setProcessEnvironment(target.environment);
     child.setStandardInputFile(QProcess::nullDevice());
     child.setStandardErrorFile(QProcess::nullDevice());
-    child.setArguments({QStringLiteral("--aurora-runtime"), QStringLiteral("privacy"),
-                        target.endpoint, target.uuid, QString::fromLatin1(verb)});
+    child.setArguments(QStringList{QStringLiteral("--aurora-runtime"), command, target.endpoint, target.uuid} +
+                       options);
 
     QEventLoop loop;
     QTimer timeout;
@@ -77,7 +73,7 @@ AuroraPrivacyState runAuroraPrivacyCommand(const AuroraPrivacyTarget& target, Au
     bool invalid = false;
     auto readOutput = [&]() {
         output += child.readAllStandardOutput();
-        if (output.size() > 16) {
+        if (output.size() > maxOutput) {
             invalid = true;
             loop.quit();
         }
@@ -117,18 +113,55 @@ AuroraPrivacyState runAuroraPrivacyCommand(const AuroraPrivacyTarget& target, Au
         child.waitForFinished(300);
     }
     readOutput();
-    if (!live || !completed || invalid || child.exitStatus() != QProcess::NormalExit) {
-        return AuroraPrivacyState::Error;
+    if (!live || !completed || invalid || child.exitStatus() != QProcess::NormalExit || child.exitCode() != 0) {
+        return {};
     }
     if (output.endsWith("\r\n")) {
         output.chop(2);
     } else if (output.endsWith('\n')) {
         output.chop(1);
     }
-    if (child.exitCode() == 0) {
-        if (output == "on") return AuroraPrivacyState::On;
-        if (output == "off") return AuroraPrivacyState::Off;
-        if (output == "unavailable") return AuroraPrivacyState::Unavailable;
+    if (output.contains('\r') || output.contains('\n')) {
+        return {};
     }
+    return output;
+}
+
+AuroraPrivacyState runAuroraPrivacyCommand(const AuroraPrivacyTarget& target, AuroraPrivacyOperation operation,
+                                          const std::atomic<bool>& live)
+{
+    if (!live || target.program.isEmpty()) {
+        return AuroraPrivacyState::Unavailable;
+    }
+
+    const char* verb = "status";
+    switch (operation) {
+    case AuroraPrivacyOperation::Status: break;
+    case AuroraPrivacyOperation::Enable: verb = "on"; break;
+    case AuroraPrivacyOperation::Disable: verb = "off"; break;
+    }
+    const auto output = runAuroraSessionCommand(target, QStringLiteral("privacy"),
+        {QString::fromLatin1(verb)}, 16, live);
+    if (output == "on") return AuroraPrivacyState::On;
+    if (output == "off") return AuroraPrivacyState::Off;
+    if (output == "unavailable") return AuroraPrivacyState::Unavailable;
     return AuroraPrivacyState::Error;
+}
+
+QByteArray runAuroraBitrateCommand(const AuroraPrivacyTarget& target, const AuroraBitrate::Request& request,
+                                  const std::atomic<bool>& live)
+{
+    QStringList options{QStringLiteral("status")};
+    if (request.setting()) {
+        if (!AuroraBitrate::validSession(request.session) ||
+                !AuroraBitrate::canonicalKbps(request.kbps, AuroraBitrate::MinRequestedKbps)) {
+            return {};
+        }
+        options = QStringList{QStringLiteral("set"), QString::fromLatin1(request.session),
+                              QString::fromLatin1(request.kbps), QString::number(request.revision)};
+    }
+    // The paired helper calls NvHTTP::sendAuroraBitrate and prints one validated line.
+    const auto output = runAuroraSessionCommand(target, QStringLiteral("bitrate"),
+        options, AuroraBitrate::MaxReplyBytes + 2, live);
+    return AuroraBitrate::validatedLine(request, output);
 }

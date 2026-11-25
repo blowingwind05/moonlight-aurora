@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QByteArray>
 #include <QElapsedTimer>
 #include <QProcessEnvironment>
 #include <QString>
@@ -8,6 +9,7 @@
 #include <utility>
 
 class NvAddress;
+namespace AuroraBitrate { struct Request; }
 
 enum class AuroraPrivacyOperation {
     Status,
@@ -36,6 +38,8 @@ AuroraPrivacyTarget makeAuroraPrivacyTarget(const NvAddress& address, int httpsP
 
 AuroraPrivacyState runAuroraPrivacyCommand(const AuroraPrivacyTarget& target, AuroraPrivacyOperation operation,
                                           const std::atomic<bool>& live);
+QByteArray runAuroraBitrateCommand(const AuroraPrivacyTarget& target, const AuroraBitrate::Request& request,
+                                  const std::atomic<bool>& live);
 
 struct AuroraSessionPrivacy {
     explicit AuroraSessionPrivacy(AuroraPrivacyTarget target) : target(std::move(target)) {}
