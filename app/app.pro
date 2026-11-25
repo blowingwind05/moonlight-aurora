@@ -591,3 +591,5 @@ macx {
 
 VERSION = "$$cat(version.txt)"
 DEFINES += VERSION_STR=\\\"$$cat(version.txt)\\\"
+
+contains(DEFINES, AURORA_STREAM_RUNTIME): include(AuroraStreamTargets.pri)

@@ -13,6 +13,7 @@
 #include <QTemporaryFile>
 #include <QRegularExpression>
 #include <QTimer>
+#include <cstring>
 
 #ifdef AURORA_STREAM_RUNTIME
 #include "AuroraStreamEntry.h"
@@ -470,19 +471,19 @@ static int runAuroraWallpaper(int argc, char** argv)
 }
 #endif
 
-int main(int argc, char *argv[])
-{
 #ifdef AURORA_STREAM_RUNTIME
-    const int invocation = prepareAuroraStreamInvocation(argc, argv);
-    if (invocation >= 0) {
-        return invocation;
-    }
-#ifdef Q_OS_WIN32
-    const int windowError = prepareAuroraWindowsStream(argv[1]);
-    if (windowError != 0) {
-        return windowError;
-    }
+int runAuroraStream(AuroraStreamOperation operation, int argc, char *argv[])
+#else
+int main(int argc, char *argv[])
 #endif
+{
+#if defined(Q_OS_WIN32) && defined(AURORA_STREAM_RUNTIME)
+    if (operation == AuroraStreamOperation::Stream) {
+        const int windowError = prepareAuroraWindowsStream();
+        if (windowError != 0) {
+            return windowError;
+        }
+    }
 #endif
     SDL_SetMainReady();
 
@@ -779,9 +780,26 @@ int main(int argc, char *argv[])
     }
 #endif
 
-    GlobalCommandLineParser parser;
     const auto arguments = app.arguments();
+#ifdef AURORA_STREAM_RUNTIME
+    GlobalCommandLineParser::ParseResult commandLineParserResult;
+    switch (operation) {
+    case AuroraStreamOperation::Pair:
+        commandLineParserResult = GlobalCommandLineParser::PairRequested;
+        break;
+    case AuroraStreamOperation::List:
+        commandLineParserResult = GlobalCommandLineParser::ListRequested;
+        break;
+    case AuroraStreamOperation::Stream:
+        commandLineParserResult = GlobalCommandLineParser::StreamRequested;
+        break;
+    default:
+        return 2;
+    }
+#else
+    GlobalCommandLineParser parser;
     GlobalCommandLineParser::ParseResult commandLineParserResult = parser.parse(arguments);
+#endif
     if (commandLineParserResult == GlobalCommandLineParser::ListRequested) {
         // Don't log to the console since it will jumble the command output
         s_SuppressVerboseOutput = true;

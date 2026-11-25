@@ -72,10 +72,10 @@ static void startAuroraEmbeddedStream(QGuiApplication& app, CliStartStream::Laun
     });
 }
 
-int prepareAuroraWindowsStream(const char* verb)
+int prepareAuroraWindowsStream()
 {
     const auto invitation = qgetenv("AURORA_EMBEDDED_SESSION");
-    if (std::strcmp(verb, "stream") == 0 && !invitation.isEmpty() &&
+    if (!invitation.isEmpty() &&
             !AuroraEmbeddedSession::current().configure(invitation)) {
         return AuroraEmbeddedSession::AttachmentFailed;
     }

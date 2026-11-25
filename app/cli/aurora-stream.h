@@ -7,7 +7,7 @@ class QString;
 class StreamingPreferences;
 
 #if defined(Q_OS_WIN32)
-int prepareAuroraWindowsStream(const char* verb);
+int prepareAuroraWindowsStream();
 bool startAuroraWindowsStream(QGuiApplication& app, const QString& host, const QString& appName,
                               StreamingPreferences* preferences);
 #elif defined(Q_OS_DARWIN)

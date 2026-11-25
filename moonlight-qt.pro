@@ -22,3 +22,11 @@ CONFIG += debug_and_release
 load(configure)
 qtCompileTest(SL)
 qtCompileTest(EGL)
+
+contains(DEFINES, AURORA_STREAM_RUNTIME) {
+    SUBDIRS += aurora_stream_engine
+    aurora_stream_engine.file = app/AuroraStreamEngine.pro
+    aurora_stream_engine.makefile = Makefile.AuroraStreamEngine
+    aurora_stream_engine.depends = $$app.depends
+    app.depends += aurora_stream_engine
+}
