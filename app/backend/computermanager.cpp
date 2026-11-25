@@ -774,7 +774,8 @@ public:
           m_Address(address),
           m_MdnsIpv6Address(mdnsIpv6Address),
           m_Mdns(mdns),
-          m_AboutToQuit(false)
+          m_AboutToQuit(false),
+          m_ExpectedPairedHost(!mdns ? qEnvironmentVariable("AURORA_GAMESTREAM_PAIRED_HOST_UUID") : QString())
     {
         connect(this, &PendingAddTask::computerAddCompleted,
                 computerManager, &ComputerManager::computerAddCompleted);
@@ -812,7 +813,7 @@ private:
             try {
                 serverInfo = http.getServerInfo(NvHTTP::NVLL_VERBOSE);
             } catch (const QtNetworkReplyException& e) {
-                if (e.getError() == QNetworkReply::ServiceUnavailableError) {
+                if (m_ExpectedPairedHost.isEmpty() && e.getError() == QNetworkReply::ServiceUnavailableError) {
                     qWarning() << "Retrying request in 5 seconds after ServiceUnavailableError";
                     QThread::sleep(5);
                     serverInfo = http.getServerInfo(NvHTTP::NVLL_VERBOSE);
@@ -828,14 +829,17 @@ private:
             if (!m_Mdns) {
                 unsigned int portTestResult;
 
-                if (NvHTTP::gameStreamRelayBase(m_Address) == 0 &&
+#ifndef AURORA_STREAM_RUNTIME
+                if (m_ExpectedPairedHost.isEmpty() && NvHTTP::gameStreamRelayBase(m_Address) == 0 &&
                     m_ComputerManager->m_Prefs->detectNetworkBlocking) {
                     // We failed to connect to the specified PC. Let's test to make sure this network
                     // isn't blocking Moonlight, so we can tell the user about it.
                     portTestResult = LiTestClientConnectivity("qt.conntest.moonlight-stream.org", 443,
                                                               ML_PORT_FLAG_TCP_47984 | ML_PORT_FLAG_TCP_47989);
                 }
-                else {
+                else
+#endif
+                {
                     portTestResult = 0;
                 }
 
@@ -847,7 +851,18 @@ private:
 
     void run()
     {
-        NvHTTP http(m_Address, 0, QSslCertificate());
+        const bool alreadyPaired = !m_ExpectedPairedHost.isEmpty();
+        QSslCertificate certificate;
+        uint16_t httpsPort = 0;
+        if (alreadyPaired) {
+            certificate = ComputerManager::readSavedCertificate(m_ExpectedPairedHost);
+            if (certificate.isNull() || m_Address.port() <= DEFAULT_HTTP_PORT - DEFAULT_HTTPS_PORT) {
+                emit computerAddCompleted(false, false);
+                return;
+            }
+            httpsPort = m_Address.port() + DEFAULT_HTTPS_PORT - DEFAULT_HTTP_PORT;
+        }
+        NvHTTP http(m_Address, httpsPort, certificate, alreadyPaired);
 
         qInfo() << "Processing new PC at" << m_Address.toString() << "from" << (m_Mdns ? "mDNS" : "user") << "with IPv6 address" << m_MdnsIpv6Address.toString();
 
@@ -862,8 +877,18 @@ private:
             return;
         }
 
-        // Create initial newComputer using HTTP serverinfo with no pinned cert
+        if (alreadyPaired &&
+            (NvHTTP::getXmlString(serverInfo, "uniqueid").compare(m_ExpectedPairedHost, Qt::CaseInsensitive) != 0 ||
+             NvHTTP::getXmlString(serverInfo, "PairStatus") != "1")) {
+            emit computerAddCompleted(false, false);
+            return;
+        }
+
+        // Create the computer from the verified route or the legacy discovery response.
         NvComputer* newComputer = new NvComputer(http, serverInfo);
+        if (alreadyPaired) {
+            newComputer->activeHttpsPort = http.httpsPort();
+        }
 
         // Check if we have a record of this host UUID to pull the pinned cert
         NvComputer* existingComputer;
@@ -876,7 +901,7 @@ private:
         }
 
         // Fetch serverinfo again over HTTPS with the pinned cert
-        if (existingComputer != nullptr) {
+        if (!alreadyPaired && existingComputer != nullptr) {
             Q_ASSERT(http.httpsPort() != 0);
             serverInfo = fetchServerInfo(http);
             if (serverInfo.isEmpty()) {
@@ -957,7 +982,7 @@ private:
                 }
 
                 // Tell our client if something changed
-                if (changed) {
+                if (alreadyPaired || changed) {
                     qInfo() << existingComputer->name << "is now at" << existingComputer->activeAddress.toString();
                     emit computerStateChanged(existingComputer);
                 }
@@ -974,7 +999,7 @@ private:
 
                 // If this wasn't added via mDNS but it is a RFC 1918 IPv4 address and not a VPN,
                 // go ahead and do the STUN request now to populate an external address.
-                if (!m_Mdns && addressIsSiteLocalV4 && newComputer->getActiveAddressReachability() != NvComputer::RI_VPN) {
+                if (!alreadyPaired && !m_Mdns && addressIsSiteLocalV4 && newComputer->getActiveAddressReachability() != NvComputer::RI_VPN) {
                     quint32 addr;
                     int err = LiFindExternalAddressIP4("stun.moonlight-stream.org", 3478, &addr);
                     if (err == 0) {
@@ -1001,6 +1026,7 @@ private:
     NvAddress m_MdnsIpv6Address;
     bool m_Mdns;
     bool m_AboutToQuit;
+    QString m_ExpectedPairedHost;
 };
 
 void ComputerManager::addNewHost(NvAddress address, bool mdns, NvAddress mdnsIpv6Address)

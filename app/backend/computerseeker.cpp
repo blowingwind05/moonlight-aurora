@@ -8,12 +8,19 @@ ComputerSeeker::ComputerSeeker(ComputerManager *manager, QString computerName, Q
     : QObject(parent), m_ComputerManager(manager), m_ComputerName(computerName),
       m_TimeoutTimer(new QTimer(this)), m_LoadApps(loadApps)
 {
+    // A paired Aurora connection already has a verified route and an awake host.
+    if (m_LoadApps) {
+        m_ExpectedPairedHost = qEnvironmentVariable("AURORA_GAMESTREAM_PAIRED_HOST_UUID");
+    }
+#ifndef AURORA_STREAM_RUNTIME
     // If we know this computer, send a WOL packet to wake it up in case it is asleep.
     for (NvComputer * computer: m_ComputerManager->getComputers()) {
-        if (NvHTTP::gameStreamRelayAddress().isNull() && this->matchComputer(computer)) {
+        if (m_ExpectedPairedHost.isEmpty() && NvHTTP::gameStreamRelayAddress().isNull() && this->matchComputer(computer)) {
             computer->wake();
         }
     }
+
+#endif
 
     m_TimeoutTimer->setSingleShot(true);
     connect(m_TimeoutTimer, &QTimer::timeout,
@@ -25,6 +32,16 @@ ComputerSeeker::ComputerSeeker(ComputerManager *manager, QString computerName, Q
 void ComputerSeeker::start(int timeout)
 {
     m_TimeoutTimer->start(timeout);
+    if (!m_ExpectedPairedHost.isEmpty()) {
+        connect(m_ComputerManager, &ComputerManager::computerAddCompleted, this,
+                [this](const QVariant& success, const QVariant&) {
+            if (!success.toBool() && m_TimeoutTimer->isActive()) {
+                onTimeout();
+            }
+        });
+        m_ComputerManager->addNewHostManually(m_ComputerName);
+        return;
+    }
     const auto relayAddress = NvHTTP::gameStreamRelayAddress();
     if (!relayAddress.isNull()) {
         m_ComputerManager->addNewHostManually(relayAddress.toString());
@@ -36,7 +53,9 @@ void ComputerSeeker::start(int timeout)
     // address) and by polling it using mDNS, hopefully one of these methods
     // would find the host
     m_ComputerManager->addNewHostManually(m_ComputerName);
+#ifndef AURORA_STREAM_RUNTIME
     m_ComputerManager->startPolling();
+#endif
 }
 
 void ComputerSeeker::onComputerUpdated(NvComputer *computer)
@@ -45,7 +64,7 @@ void ComputerSeeker::onComputerUpdated(NvComputer *computer)
         return;
     }
     if (matchComputer(computer) && isOnline(computer)) {
-        if (NvHTTP::gameStreamRelayAddress().isNull()) {
+        if (m_ExpectedPairedHost.isEmpty() && NvHTTP::gameStreamRelayAddress().isNull()) {
             m_ComputerManager->stopPollingAsync();
         }
         m_TimeoutTimer->stop();
@@ -64,6 +83,10 @@ bool ComputerSeeker::matchComputer(NvComputer *computer) const
     if (!relayAddress.isNull()) {
         return computer->activeAddress == relayAddress &&
                computer->uuid == qEnvironmentVariable("AURORA_GAMESTREAM_HOST_UUID");
+    }
+    if (!m_ExpectedPairedHost.isEmpty()) {
+        return computer->activeAddress.toString().compare(m_ComputerName, Qt::CaseInsensitive) == 0 &&
+               computer->uuid.compare(m_ExpectedPairedHost, Qt::CaseInsensitive) == 0;
     }
     QString value = m_ComputerName.toLower();
 
@@ -88,7 +111,7 @@ bool ComputerSeeker::isOnline(NvComputer *computer) const
 void ComputerSeeker::onTimeout()
 {
     m_TimeoutTimer->stop();
-    if (NvHTTP::gameStreamRelayAddress().isNull()) {
+    if (m_ExpectedPairedHost.isEmpty() && NvHTTP::gameStreamRelayAddress().isNull()) {
         m_ComputerManager->stopPollingAsync();
     }
     emit errorTimeout();

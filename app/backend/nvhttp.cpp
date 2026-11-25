@@ -43,7 +43,8 @@ NvHTTP::NvHTTP(NvAddress address, uint16_t httpsPort, QSslCertificate serverCert
 }
 
 NvHTTP::NvHTTP(NvComputer* computer) :
-    NvHTTP(computer->activeAddress, computer->activeHttpsPort, computer->serverCert)
+    NvHTTP(computer->activeAddress, computer->activeHttpsPort, computer->serverCert,
+           qEnvironmentVariableIsSet("AURORA_GAMESTREAM_PAIRED_HOST_UUID"))
 {
 
 }
