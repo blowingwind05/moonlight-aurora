@@ -385,8 +385,9 @@ macx {
     message(VideoToolbox renderer selected)
 
     contains(DEFINES, AURORA_STREAM_RUNTIME) {
-        SOURCES += streaming/aurora-session-toolbar.mm
-        HEADERS += streaming/aurora-session-toolbar.h
+        SOURCES += streaming/aurora-session-toolbar.mm streaming/aurora-session-privacy.cpp
+        HEADERS += streaming/aurora-session-toolbar.h streaming/aurora-session-privacy.h
+        LIBS += -framework CoreFoundation
     }
 
     SOURCES += \

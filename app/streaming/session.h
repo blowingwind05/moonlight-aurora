@@ -11,6 +11,11 @@
 #include "audio/renderers/renderer.h"
 #include "video/overlaymanager.h"
 
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+#include <memory>
+struct AuroraSessionPrivacy;
+#endif
+
 class Session : public QObject
 {
     Q_OBJECT
@@ -162,6 +167,9 @@ private:
     DECODER_RENDERER_CALLBACKS m_VideoCallbacks;
     AUDIO_RENDERER_CALLBACKS m_AudioCallbacks;
     NvComputer* m_Computer;
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    std::shared_ptr<AuroraSessionPrivacy> m_AuroraPrivacy;
+#endif
     NvApp m_App;
     SDL_Window* m_Window;
     IVideoDecoder* m_VideoDecoder;

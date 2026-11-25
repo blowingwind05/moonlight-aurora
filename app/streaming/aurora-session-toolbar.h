@@ -2,6 +2,10 @@
 
 #include <SDL.h>
 
+#include <memory>
+
+struct AuroraSessionPrivacy;
+
 // Reserved alongside Session's SDL_USEREVENT codes.
 enum class AuroraToolbarAction : Sint32 {
     Disconnect = 105,
@@ -9,4 +13,4 @@ enum class AuroraToolbarAction : Sint32 {
     ToggleStats,
 };
 
-bool installAuroraSessionToolbar(SDL_Window* window);
+bool installAuroraSessionToolbar(SDL_Window* window, const std::shared_ptr<AuroraSessionPrivacy>& privacy);

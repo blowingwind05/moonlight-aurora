@@ -8,6 +8,7 @@
 #include "utils.h"
 
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+#include "aurora-session-privacy.h"
 #include "aurora-session-toolbar.h"
 #endif
 
@@ -1411,9 +1412,26 @@ bool Session::startConnectionAsync()
     }
 
     QString rtspSessionUrl;
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    NvAddress launchAddress;
+    int launchHttpsPort = 0;
+    QString launchUuid;
+    bool hasPinnedCertificate = false;
+#endif
 
     try {
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+        QReadLocker routeLock(&m_Computer->lock);
+#endif
         NvHTTP http(m_Computer);
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+        // This address is the one used for /launch or /resume, not a later discovery result.
+        launchAddress = http.address();
+        launchHttpsPort = http.httpsPort();
+        launchUuid = m_Computer->uuid;
+        hasPinnedCertificate = !http.serverCert().isNull();
+        routeLock.unlock();
+#endif
         http.startApp(m_Computer->currentGameId != 0 ? "resume" : "launch",
                       m_Computer->isNvidiaServerSoftware,
                       m_App.id, &m_StreamConfig,
@@ -1430,11 +1448,16 @@ bool Session::startConnectionAsync()
         return false;
     }
 
-    QByteArray hostnameStr = m_Computer->activeAddress.address().toLatin1();
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    const auto& streamAddress = launchAddress;
+#else
+    const auto& streamAddress = m_Computer->activeAddress;
+#endif
+    QByteArray hostnameStr = streamAddress.address().toLatin1();
     QByteArray siAppVersion = m_Computer->appVersion.toLatin1();
 
     SERVER_INFORMATION hostInfo = {};
-    hostInfo.auroraRelayBasePort = NvHTTP::gameStreamRelayBase(m_Computer->activeAddress);
+    hostInfo.auroraRelayBasePort = NvHTTP::gameStreamRelayBase(streamAddress);
     hostInfo.address = hostnameStr.data();
     hostInfo.serverInfoAppVersion = siAppVersion.data();
     hostInfo.serverCodecModeSupport = m_Computer->serverCodecModeSupport;
@@ -1504,6 +1527,10 @@ bool Session::startConnectionAsync()
         return false;
     }
 
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    m_AuroraPrivacy = std::make_shared<AuroraSessionPrivacy>(
+        makeAuroraPrivacyTarget(launchAddress, launchHttpsPort, launchUuid, hasPinnedCertificate));
+#endif
     emit connectionStarted();
     return true;
 }
@@ -1759,7 +1786,7 @@ void Session::execInternal()
     m_InputHandler->setWindow(m_Window);
 
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
-    const bool hasWindowedToolbar = !m_IsFullScreen && installAuroraSessionToolbar(m_Window);
+    const bool hasWindowedToolbar = !m_IsFullScreen && installAuroraSessionToolbar(m_Window, m_AuroraPrivacy);
 #endif
 
     QSvgRenderer svgIconRenderer(QString(":/res/moonlight.svg"));
@@ -2164,7 +2191,7 @@ void Session::execInternal()
 
             SDL_AtomicUnlock(&m_DecoderLock);
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
-            installAuroraSessionToolbar(m_Window);
+            installAuroraSessionToolbar(m_Window, m_AuroraPrivacy);
 #endif
             break;
 
@@ -2223,6 +2250,12 @@ void Session::execInternal()
     }
 
 DispatchDeferredCleanup:
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    if (m_AuroraPrivacy) {
+        m_AuroraPrivacy->live = false;
+        m_AuroraPrivacy.reset();
+    }
+#endif
     // Uncapture the mouse and hide the window immediately,
     // so we can return to the Qt GUI ASAP.
     m_InputHandler->setCaptureActive(false);
