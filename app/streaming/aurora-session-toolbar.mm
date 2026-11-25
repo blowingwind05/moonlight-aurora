@@ -1,5 +1,7 @@
 #include "aurora-session-toolbar.h"
 #include "aurora-session-toolbar-layout.h"
+#include "aurora-connection-details.h"
+#include <vector>
 #include "aurora-session-privacy.h"
 
 #import <AppKit/AppKit.h>
@@ -231,7 +233,15 @@ namespace {
 - (BOOL)mouseDownCanMoveWindow { return YES; }
 @end
 
-@interface AuroraSessionToolbarController : NSObject <NSToolbarDelegate, NSMenuDelegate> {
+@interface AuroraConnectionStatus : NSButton
+@end
+
+@implementation AuroraConnectionStatus
+- (NSView*)hitTest:(NSPoint)point { return [super hitTest:point] ? self : nil; }
+- (BOOL)mouseDownCanMoveWindow { return NO; }
+@end
+
+@interface AuroraSessionToolbarController : NSObject <NSToolbarDelegate, NSMenuDelegate, NSPopoverDelegate> {
 @public
     Uint32 streamWindowId;
     std::shared_ptr<AuroraSessionPrivacy> privacy;
@@ -241,7 +251,11 @@ namespace {
     AuroraToolbarGroup* _context;
     AuroraToolbarGroup* _actions;
     NSTextField* _device;
-    NSView* _status;
+    AuroraConnectionStatus* _status;
+    NSImageView* _statusChevron;
+    NSPopover* _connectionDetails;
+    NSTimer* _connectionRefresh;
+    NSMenuItem* _fullscreenDetailsItem;
     AuroraStatusDot* _dot;
     NSTextField* _statusText;
     AuroraToolbarButton* _fullscreen;
@@ -258,6 +272,9 @@ namespace {
 - (AuroraToolbarButton*)addButton:(NSString*)title symbol:(NSString*)symbol action:(SEL)action
                             code:(AuroraToolbarAction)code warning:(BOOL)warning;
 - (void)resizeItems;
+- (void)showConnectionDetails:(id)sender;
+- (void)closeConnectionDetails;
+- (void)refreshConnectionDetails:(NSTimer*)timer;
 - (void)showIfWindowed;
 - (void)showFullscreenControls:(BOOL)visible;
 - (void)positionFullscreenControls;
@@ -287,10 +304,17 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     _device.toolTip = name;
     [_context addSubview:_device];
 
-    _status = [[[NSView alloc] initWithFrame:NSZeroRect] autorelease];
-    [_status setAccessibilityElement:YES];
-    [_status setAccessibilityRole:NSAccessibilityStaticTextRole];
+    _status = [[[AuroraConnectionStatus alloc] initWithFrame:NSZeroRect] autorelease];
+    _status.bordered = NO;
+    _status.target = self;
+    _status.action = @selector(showConnectionDetails:);
+    _status.toolTip = @"连接详情";
     [_context addSubview:_status];
+    _statusChevron = [[[NSImageView alloc] initWithFrame:NSZeroRect] autorelease];
+    _statusChevron.image = [[NSImage imageWithSystemSymbolName:@"chevron.down" accessibilityDescription:nil]
+        imageWithSymbolConfiguration:[NSImageSymbolConfiguration configurationWithPointSize:8 weight:NSFontWeightRegular]];
+    [_statusChevron setAccessibilityElement:NO];
+    [_status addSubview:_statusChevron];
     _dot = [[[AuroraStatusDot alloc] initWithFrame:NSZeroRect] autorelease];
     [_status addSubview:_dot];
     _statusText = [NSTextField labelWithString:@""];
@@ -328,9 +352,9 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     [_controlMenu addItem:_privacyNote];
     [_privacyNote release];
     [_controlMenu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem* stats = [_controlMenu addItemWithTitle:@"显示／隐藏性能统计" action:@selector(sendMenuAction:) keyEquivalent:@""];
-    stats.target = self;
-    stats.tag = static_cast<NSInteger>(AuroraToolbarAction::ToggleStats);
+    _fullscreenDetailsItem = [_controlMenu addItemWithTitle:@"连接详情" action:@selector(showConnectionDetails:) keyEquivalent:@""];
+    _fullscreenDetailsItem.target = self;
+    _fullscreenDetailsItem.hidden = YES;
     NSMenuItem* release = [_controlMenu addItemWithTitle:@"释放鼠标" action:@selector(sendMenuAction:) keyEquivalent:@"z"];
     release.target = self;
     release.tag = static_cast<NSInteger>(AuroraToolbarAction::ReleaseMouse);
@@ -377,8 +401,9 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     _device.frame = NSMakeRect(0, (GroupHeight - 20) / 2, layout.device, 20);
     _status.frame = NSMakeRect(layout.device + 8, 4, layout.status, 28);
     _statusText.hidden = layout.status == 25;
-    _dot.frame = NSMakeRect(_statusText.hidden ? 9.5 : 6, 11, 6, 6);
-    _statusText.frame = NSMakeRect(19, 6, layout.status - 19, 16);
+    _dot.frame = NSMakeRect(_statusText.hidden ? 3 : 6, 11, 6, 6);
+    _statusText.frame = NSMakeRect(19, 6, layout.status - 33, 16);
+    _statusChevron.frame = NSMakeRect(layout.status - 12, 8, 9, 12);
     [_fullscreen showLabel:layout.fullscreen > 32];
     [_controls showLabel:layout.controls > 32];
     [_disconnect showLabel:layout.disconnect > 32];
@@ -407,6 +432,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 - (void)showFullscreenControls:(BOOL)visible
 {
     _exitFullscreen.hidden = !visible;
+    _fullscreenDetailsItem.hidden = !visible;
     if (!visible) {
         if (_floatingPanel.parentWindow == _window) [_window removeChildWindow:_floatingPanel];
         [_floatingPanel orderOut:nil];
@@ -490,8 +516,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     NSString* text = poor ? @"网络较差" : @"已连接";
     _statusText.stringValue = text;
     _statusText.textColor = rgb(poor ? 0x946317 : 0x52647b);
-    _status.toolTip = text;
-    [_status setAccessibilityLabel:text];
+    [_status setAccessibilityLabel:[text stringByAppendingString:@"，查看连接详情"]];
 }
 
 - (void)sendButtonAction:(NSButton*)sender
@@ -506,10 +531,95 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 
 - (void)showControls:(AuroraToolbarButton*)sender
 {
+    [self closeConnectionDetails];
     [sender markMenuOpen:YES];
     [_controlMenu popUpMenuPositioningItem:nil atLocation:NSMakePoint(
         NSWidth(sender.bounds) - _controlMenu.minimumWidth, NSMinY(sender.bounds)) inView:sender];
     [sender markMenuOpen:NO];
+}
+
+- (void)showConnectionDetails:(id)sender
+{
+    if (_connectionDetails.shown) {
+        [self closeConnectionDetails];
+        return;
+    }
+
+    NSView* anchor = sender == _status ? _status : _floatingPanel.contentView;
+    if (!anchor.window) return;
+    if (!_connectionDetails) {
+        _connectionDetails = [[NSPopover alloc] init];
+        _connectionDetails.delegate = self;
+        _connectionDetails.behavior = NSPopoverBehaviorTransient;
+        _connectionDetails.animates = NO;
+        _connectionDetails.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
+        auto* content = [[[NSViewController alloc] init] autorelease];
+        content.view = [[[NSView alloc] initWithFrame:NSMakeRect(0, 0, 292, 80)] autorelease];
+        _connectionDetails.contentViewController = content;
+    }
+
+    [self refreshConnectionDetails:nil];
+    [_connectionDetails showRelativeToRect:anchor.bounds ofView:anchor preferredEdge:NSRectEdgeMinY];
+    if (_connectionDetails.shown) {
+        _connectionRefresh = [[NSTimer timerWithTimeInterval:1 target:self
+            selector:@selector(refreshConnectionDetails:) userInfo:nil repeats:YES] retain];
+        [NSRunLoop.mainRunLoop addTimer:_connectionRefresh forMode:NSRunLoopCommonModes];
+    }
+}
+
+- (void)refreshConnectionDetails:(NSTimer*)timer
+{
+    const auto details = AuroraConnectionMonitor::instance().latest();
+    std::vector<std::pair<NSString*, NSString*>> rows;
+    if (details.roundTripMs > 0) rows.emplace_back(@"网络延迟", [NSString stringWithFormat:@"%d ms", details.roundTripMs]);
+    if (details.width > 0 && details.height > 0) {
+        rows.emplace_back(@"画面分辨率", [NSString stringWithFormat:@"%d × %d", details.width, details.height]);
+    }
+    if (details.fpsHundredths > 0) rows.emplace_back(@"接收帧率", [NSString stringWithFormat:@"%.1f FPS", details.fpsHundredths / 100.0]);
+    if (details.videoKbps > 0) rows.emplace_back(@"接收码率", [NSString stringWithFormat:@"%.1f Mbps", details.videoKbps / 1000.0]);
+    if (details.lossHundredths >= 0) rows.emplace_back(@"网络丢帧", [NSString stringWithFormat:@"%.1f%%", details.lossHundredths / 100.0]);
+    if (details.codec >= 1 && details.codec <= 3) {
+        NSArray<NSString*>* codecs = @[@"H.264", @"HEVC", @"AV1"];
+        rows.emplace_back(@"视频编码", codecs[details.codec - 1]);
+    }
+    if (details.decodeMicroseconds >= 0) rows.emplace_back(@"平均解码耗时", [NSString stringWithFormat:@"%.1f ms", details.decodeMicroseconds / 1000.0]);
+    if (rows.empty()) rows.emplace_back(@"暂无连接参数", @"");
+
+    NSView* view = _connectionDetails.contentViewController.view;
+    view.subviews = @[];
+    const CGFloat height = 43 + 23 * rows.size();
+    auto* title = [NSTextField labelWithString:@"连接详情"];
+    title.font = [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold];
+    title.frame = NSMakeRect(13, height - 30, 266, 18);
+    [view addSubview:title];
+    CGFloat y = height - 54;
+    for (const auto& row : rows) {
+        auto* name = [NSTextField labelWithString:row.first];
+        auto* value = [NSTextField labelWithString:row.second];
+        name.frame = NSMakeRect(13, y, 132, 18);
+        name.textColor = NSColor.secondaryLabelColor;
+        value.frame = NSMakeRect(145, y, 134, 18);
+        value.alignment = NSTextAlignmentRight;
+        [view addSubview:name];
+        [view addSubview:value];
+        y -= 23;
+    }
+    _connectionDetails.contentSize = NSMakeSize(292, height);
+}
+
+- (void)closeConnectionDetails
+{
+    [_connectionRefresh invalidate];
+    [_connectionRefresh release];
+    _connectionRefresh = nil;
+    [_connectionDetails close];
+}
+
+- (void)popoverDidClose:(NSNotification*)notification
+{
+    [_connectionRefresh invalidate];
+    [_connectionRefresh release];
+    _connectionRefresh = nil;
 }
 
 - (void)updatePrivacyMenu
@@ -599,6 +709,9 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     [NSNotificationCenter.defaultCenter removeObserver:self];
     _controlMenu.delegate = nil;
     [_controlMenu release];
+    _connectionDetails.delegate = nil;
+    [self closeConnectionDetails];
+    [_connectionDetails release];
     [_floatingPanel release];
     [_context release];
     [_actions release];
@@ -682,7 +795,9 @@ void hideAuroraSessionToolbar(SDL_Window* window)
 
 void closeAuroraFullscreenControls(SDL_Window* window)
 {
-    [auroraToolbar(nativeWindow(window)) showFullscreenControls:NO];
+    auto* controller = auroraToolbar(nativeWindow(window));
+    [controller closeConnectionDetails];
+    [controller showFullscreenControls:NO];
 }
 
 void setAuroraSessionToolbarConnectionQuality(SDL_Window* window, bool poor)
