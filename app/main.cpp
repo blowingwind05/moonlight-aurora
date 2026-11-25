@@ -1,8 +1,8 @@
+#include <QDir>
+#include <QFileInfo>
 #include <QGuiApplication>
-#include <QQmlApplicationEngine>
-#include <QQmlContext>
+#include <QThreadPool>
 #include <QIcon>
-#include <QQuickStyle>
 #include <QMutex>
 #include <QtDebug>
 #include <QNetworkProxyFactory>
@@ -35,24 +35,30 @@
 #include <openssl/ssl.h>
 #endif
 
-#include "cli/listapps.h"
+#ifndef AURORA_STREAM_RUNTIME
+#include <QQmlApplicationEngine>
+#include <QQmlContext>
+#include <QQuickStyle>
 #include "cli/quitstream.h"
+#include "gui/computermodel.h"
+#include "gui/appmodel.h"
+#include "backend/autoupdatechecker.h"
+#include "backend/systemproperties.h"
+#include "gui/sdlgamepadkeynavigation.h"
+#endif
+
+#include "cli/listapps.h"
 #include "cli/startstream.h"
 #include "cli/pair.h"
 #include "cli/commandlineparser.h"
 #include "path.h"
 #include "utils.h"
-#include "gui/computermodel.h"
-#include "gui/appmodel.h"
-#include "backend/autoupdatechecker.h"
 #include "backend/computermanager.h"
 #ifdef AURORA_STREAM_RUNTIME
 #include "backend/aurora-bitrate.h"
 #endif
-#include "backend/systemproperties.h"
 #include "streaming/session.h"
 #include "settings/streamingpreferences.h"
-#include "gui/sdlgamepadkeynavigation.h"
 #include "streaming/auroraembedded.h"
 
 #if defined(Q_OS_WIN32) && defined(AURORA_STREAM_RUNTIME)
@@ -946,6 +952,36 @@ int main(int argc, char *argv[])
     qputenv("SDL_VIDEO_WAYLAND_WMCLASS", "com.moonlight_stream.Moonlight");
     qputenv("SDL_VIDEO_X11_WMCLASS", "com.moonlight_stream.Moonlight");
 
+#ifdef AURORA_STREAM_RUNTIME
+    IdentityManager::get();
+    if (commandLineParserResult == GlobalCommandLineParser::ListRequested) {
+        ListCommandLineParser listParser;
+        listParser.parse(arguments);
+        auto launcher = new CliListApps::Launcher(listParser.getHost(), listParser, &app);
+        auto manager = new ComputerManager(StreamingPreferences::get());
+        manager->setParent(&app);
+        launcher->execute(manager);
+    }
+#if defined(Q_OS_WIN32)
+    else if (commandLineParserResult == GlobalCommandLineParser::StreamRequested &&
+             AuroraEmbeddedSession::current().enabled()) {
+        auto preferences = StreamingPreferences::get();
+        StreamCommandLineParser streamParser;
+        streamParser.parse(arguments, preferences);
+        preferences->windowMode = StreamingPreferences::WM_WINDOWED;
+        preferences->captureSysKeysMode = StreamingPreferences::CSK_OFF;
+        if (qEnvironmentVariableIsSet("AURORA_CONNECTION_DETAILS")) {
+            AuroraConnectionMonitor::instance().enableParentReporting();
+        }
+        auto launcher = new CliStartStream::Launcher(streamParser.getHost(), streamParser.getAppName(), preferences, &app);
+        startAuroraEmbeddedStream(app, launcher, preferences);
+    }
+#endif
+    else {
+        fputs("Aurora Stream requires an Aurora session or background command.\n", stderr);
+        return 2;
+    }
+#else
     // Register our C++ types for QML
     qmlRegisterType<ComputerModel>("ComputerModel", 1, 0, "ComputerModel");
     qmlRegisterType<AppModel>("AppModel", 1, 0, "AppModel");
@@ -1010,18 +1046,6 @@ int main(int argc, char *argv[])
             QString host    = streamParser.getHost();
             QString appName = streamParser.getAppName();
             auto launcher   = new CliStartStream::Launcher(host, appName, preferences, &app);
-#if defined(Q_OS_WIN32) && defined(AURORA_STREAM_RUNTIME)
-            if (AuroraEmbeddedSession::current().enabled()) {
-                preferences->windowMode = StreamingPreferences::WM_WINDOWED;
-                preferences->captureSysKeysMode = StreamingPreferences::CSK_OFF;
-                if (qEnvironmentVariableIsSet("AURORA_CONNECTION_DETAILS")) {
-                    AuroraConnectionMonitor::instance().enableParentReporting();
-                }
-                startAuroraEmbeddedStream(app, launcher, preferences);
-                hasGUI = false;
-                break;
-            }
-#endif
             engine.rootContext()->setContextProperty("launcher", launcher);
             break;
         }
@@ -1060,6 +1084,8 @@ int main(int argc, char *argv[])
         if (engine.rootObjects().isEmpty())
             return -1;
     }
+
+#endif
 
     int err = app.exec();
 
