@@ -491,7 +491,6 @@ namespace {
     NSTextField* _bitrateFeedback;
     NSSlider* _bitrateSlider;
     BitrateMode _bitrateMode;
-    bool _bitrateBusy;
     QByteArray _bitrateSession;
     quint32 _bitrateRevision;
     int _bitrateRequestedKbps;
@@ -1131,7 +1130,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 
 - (void)changeControlBitrate:(NSSlider*)sender
 {
-    if (sender != _bitrateSlider || !sender.enabled || _bitrateBusy || !privacy || !privacy->live) return;
+    if (sender != _bitrateSlider || !sender.enabled || !privacy || !privacy->live || privacy->bitrateBusy) return;
 
     const int kbps = static_cast<int>(std::lround(sender.doubleValue * 2)) * 500;
     if (_bitrateMode == BitrateMode::Live) {
@@ -1156,11 +1155,12 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     const int maximum = _bitrateMaximumKbps ? _bitrateMaximumKbps : AuroraBitrate::MaxKbps;
     _bitrateSlider.maxValue = maximum / 1000.0;
     _bitrateSlider.doubleValue = requested / 1000.0;
-    _bitrateSlider.enabled = !_bitrateBusy && (_bitrateMode == BitrateMode::Live ||
+    const bool busy = privacy && privacy->bitrateBusy;
+    _bitrateSlider.enabled = !busy && (_bitrateMode == BitrateMode::Live ||
         (_bitrateMode == BitrateMode::SavedOnly && _preferences));
     _bitrateLabel.stringValue = requested > 0 ? [NSString stringWithFormat:@"%.1f Mbps", requested / 1000.0] : @"—";
 
-    if (_bitrateBusy || _bitrateMode == BitrateMode::Unchecked) {
+    if (busy || _bitrateMode == BitrateMode::Unchecked) {
         _bitrateFeedback.stringValue = _bitrateMode == BitrateMode::Live ? @"正在应用实时码率…" : @"正在查询实时码率…";
     } else if (_bitrateMode == BitrateMode::Live) {
         _bitrateFeedback.stringValue = [NSString stringWithFormat:@"实时编码器：%d kbps", _bitrateEncoderKbps];
@@ -1173,14 +1173,14 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 
 - (void)requestBitrate:(const AuroraBitrate::Request&)request
 {
-    if (_bitrateBusy || !privacy || !privacy->live) return;
+    if (!privacy || !privacy->live || privacy->bitrateBusy) return;
     if (privacy->target.program.isEmpty()) {
         _bitrateMode = BitrateMode::SavedOnly;
         [self updateBitrateControls];
         return;
     }
 
-    _bitrateBusy = true;
+    privacy->bitrateBusy = true;
     [self updateBitrateControls];
     const std::weak_ptr<AuroraSessionPrivacy> weak(privacy);
     const auto windowId = streamWindowId;
@@ -1195,6 +1195,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
         CFRunLoopPerformBlock(mainLoop, kCFRunLoopCommonModes, ^{
             const auto current = weak.lock();
             if (!current || !current->live) return;
+            current->bitrateBusy = false;
             auto* toolbar = auroraToolbar(nativeWindow(SDL_GetWindowFromID(windowId)));
             if (toolbar && toolbar->privacy == current) {
                 [toolbar finishBitrateRequest:request reply:reply];
@@ -1206,7 +1207,6 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 
 - (void)finishBitrateRequest:(const AuroraBitrate::Request&)request reply:(const QByteArray&)reply
 {
-    _bitrateBusy = false;
     AuroraBitrate::Confirmation confirmed;
     // Keep a status retry bound to the same server session token.
     if (AuroraBitrate::parseConfirmation(request, reply, confirmed) && (_bitrateSession.isEmpty() ||
@@ -1462,6 +1462,9 @@ bool installAuroraSessionToolbar(SDL_Window* window, const QString& deviceName, 
         [controller updatePrivacyMenu];
     }
 
+    if (privacy && !privacy->lastStatusCheck.isValid())
+        [controller requestPrivacy:AuroraPrivacyOperation::Status];
+
     [controller setVideoWidth:videoWidth height:videoHeight fullscreen:fullscreen];
     [controller showFullscreenControls:fullscreen];
     if (fullscreen) return false;
@@ -1471,9 +1474,6 @@ bool installAuroraSessionToolbar(SDL_Window* window, const QString& deviceName, 
     }
 
     installSessionToolbar(native, controller);
-    if (privacy && !privacy->lastStatusCheck.isValid()) {
-        [controller requestPrivacy:AuroraPrivacyOperation::Status];
-    }
     return true;
 }
 

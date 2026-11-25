@@ -51,5 +51,11 @@ struct AuroraSessionPrivacy {
     AuroraPrivacyState state = AuroraPrivacyState::Unknown;
     QElapsedTimer lastStatusCheck;
     bool busy = false;
+    bool bitrateBusy = false;
     bool changeRejected = false;
+
+    bool canKeepApplication() const {
+        return live && !busy && !bitrateBusy &&
+            (state == AuroraPrivacyState::Off || state == AuroraPrivacyState::Unavailable);
+    }
 };

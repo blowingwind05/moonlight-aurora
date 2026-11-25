@@ -62,6 +62,9 @@ public:
 
 #ifdef AURORA_STREAM_RUNTIME
     bool transportLost() const { return m_TransportLost.load(); }
+#ifdef Q_OS_DARWIN
+    bool routeSwitched() const { return m_RouteSwitched; }
+#endif
 #endif
 
 signals:
@@ -199,6 +202,9 @@ private:
     bool m_UnexpectedTermination;
 #ifdef AURORA_STREAM_RUNTIME
     std::atomic_bool m_TransportLost{false};
+#ifdef Q_OS_DARWIN
+    bool m_RouteSwitched = false;
+#endif
 #endif
     SdlInputHandler* m_InputHandler;
     int m_MouseEmulationRefCount;

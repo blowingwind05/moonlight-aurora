@@ -14,6 +14,7 @@ enum class AuroraToolbarAction : Sint32 {
     ToggleStats,
     ReleaseMouse,
     ConnectionQualityChanged,
+    RouteSwitch,
 };
 
 bool installAuroraSessionToolbar(SDL_Window* window, const QString& deviceName, bool connectionPoor,

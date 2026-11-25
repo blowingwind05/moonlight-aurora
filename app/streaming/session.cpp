@@ -13,8 +13,14 @@
 #include "utils.h"
 
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+#include "../AuroraStreamSessionProtocol.h"
 #include "aurora-session-privacy.h"
 #include "aurora-session-toolbar.h"
+
+#include <cstdio>
+#include <cstring>
+#include <poll.h>
+#include <unistd.h>
 #endif
 
 #ifdef HAVE_FFMPEG
@@ -2099,8 +2105,46 @@ void Session::execInternal()
 
     // Hijack this thread to be the SDL main thread. We have to do this
     // because we want to suspend all Qt processing until the stream is over.
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    using namespace Aurora::StreamSession;
+    pollfd routeSwitchInput{qEnvironmentVariableIntValue(SwitchChannel) == 1 ? STDIN_FILENO : -1, POLLIN, 0};
+    char routeSwitchFrame[sizeof(SwitchRequest) - 1];
+    size_t routeSwitchBytes = 0;
+    const auto denyRouteSwitch = [] {
+        std::puts(SwitchDenied);
+        std::fflush(stdout);
+    };
+#endif
     SDL_Event event;
     for (;;) {
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+        if (routeSwitchInput.fd >= 0 && poll(&routeSwitchInput, 1, 0) > 0) {
+            if (routeSwitchInput.revents & (POLLERR | POLLNVAL)) {
+                routeSwitchInput.fd = -1;
+                continue;
+            }
+            const ssize_t count = read(routeSwitchInput.fd, routeSwitchFrame + routeSwitchBytes,
+                                       sizeof(routeSwitchFrame) - routeSwitchBytes);
+            if (count == 0) {
+                routeSwitchInput.fd = -1;
+            } else if (count > 0) {
+                routeSwitchBytes += static_cast<size_t>(count);
+                if (routeSwitchBytes == sizeof(routeSwitchFrame)) {
+                    routeSwitchBytes = 0;
+                    if (std::memcmp(routeSwitchFrame, SwitchRequest, sizeof(routeSwitchFrame)) == 0) {
+                        SDL_Event request{};
+                        request.type = SDL_USEREVENT;
+                        request.user.code = static_cast<Sint32>(AuroraToolbarAction::RouteSwitch);
+                        if (SDL_PushEvent(&request) != 1)
+                            denyRouteSwitch();
+                    } else {
+                        routeSwitchInput.fd = -1;
+                        denyRouteSwitch();
+                    }
+                }
+            }
+        }
+#endif
 #if defined(Q_OS_WIN32) && defined(AURORA_STREAM_RUNTIME)
         if (isEmbedded && SDL_TICKS_PASSED(SDL_GetTicks(), nextEmbeddedPoll)) {
             if (embedded.stopRequested()) {
@@ -2150,6 +2194,14 @@ void Session::execInternal()
         case SDL_USEREVENT:
             switch (event.user.code) {
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+            case static_cast<Sint32>(AuroraToolbarAction::RouteSwitch):
+                if (!m_Preferences->quitAppAfter && !m_TransportLost.load() &&
+                    m_AuroraPrivacy && m_AuroraPrivacy->canKeepApplication()) {
+                    m_RouteSwitched = true;
+                    goto DispatchDeferredCleanup;
+                }
+                denyRouteSwitch();
+                break;
             case static_cast<Sint32>(AuroraToolbarAction::Disconnect):
                 if (event.user.windowID == SDL_GetWindowID(m_Window)) {
                     goto DispatchDeferredCleanup;
@@ -2486,9 +2538,7 @@ DispatchDeferredCleanup:
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
     // The macOS toolbar owns privacy state. Do not resume on another route
     // while an operation is pending or the host's privacy state is uncertain.
-    if (!m_AuroraPrivacy || m_AuroraPrivacy->busy ||
-        (m_AuroraPrivacy->state != AuroraPrivacyState::Off &&
-         m_AuroraPrivacy->state != AuroraPrivacyState::Unavailable)) {
+    if (!m_AuroraPrivacy || !m_AuroraPrivacy->canKeepApplication()) {
         m_TransportLost.store(false);
     }
     if (m_AuroraPrivacy) {

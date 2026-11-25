@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <QDebug>
 #include <QGuiApplication>
 #include <QScreen>
@@ -301,6 +302,7 @@ static int runConnectionAttempt(QGuiApplication& app, const QString& host, const
         bool quittingPreviousApp = false;
         bool connected = false;
         QString sessionError;
+        const bool resumeOnly = qEnvironmentVariableIsSet("AURORA_STREAM_RESUME_ONLY");
 
         auto showProgress = [&](const QString& detail) {
             if (cancelled) return;
@@ -310,6 +312,10 @@ static int runConnectionAttempt(QGuiApplication& app, const QString& host, const
             if (cancelled || failed) return;
             failed = true;
             qWarning().noquote() << detail;
+            if (resumeOnly && !connected) {
+                app.exit(1);
+                return;
+            }
             const auto title = connected ? QStringLiteral("串流已结束") : QStringLiteral("连接失败");
             [window showTitle:nativeText(title)
                        detail:nativeText(detail) progress:NO failure:YES offerQuit:NO];
@@ -340,6 +346,10 @@ static int runConnectionAttempt(QGuiApplication& app, const QString& host, const
         QObject::connect(&launcher, &CliStartStream::Launcher::appQuitRequired, &launcher,
                          [&](const QString& runningApp) {
             if (quittingPreviousApp || cancelled || failed) return;
+            if (resumeOnly) {
+                showFailure(QStringLiteral("原来的应用已停止运行。"));
+                return;
+            }
             const auto message = QStringLiteral("要退出 %1 并启动 %2 吗？未保存的进度可能丢失。")
                                      .arg(runningApp, appName);
             [window showTitle:nativeText(QStringLiteral("已有应用正在运行"))
@@ -367,7 +377,8 @@ static int runConnectionAttempt(QGuiApplication& app, const QString& host, const
             });
             QObject::connect(session, &Session::connectionStarted, &launcher, [&]() {
                 connected = true;
-                std::puts(Aurora::StreamSession::PlaybackReady);
+                using namespace Aurora::StreamSession;
+                std::puts(qEnvironmentVariableIntValue(SwitchChannel) == 1 ? SwitchReady : PlaybackReady);
                 std::fflush(stdout);
                 [window hideConnection];
             });
@@ -379,10 +390,13 @@ static int runConnectionAttempt(QGuiApplication& app, const QString& host, const
             });
             QObject::connect(session, &Session::readyForDeletion, &launcher, [&]() {
                 const bool transportLost = session->transportLost();
+                const bool routeSwitched = session->routeSwitched();
                 session->deleteLater();
                 session = nullptr;
                 if (cancelled) {
                     app.exit(0);
+                } else if (routeSwitched) {
+                    app.exit(Aurora::StreamSession::RouteSwitched);
                 } else if (transportLost) {
                     app.exit(Aurora::StreamSession::TransportLost);
                 } else if (!sessionError.isEmpty() || !connected) {
