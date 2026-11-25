@@ -7,6 +7,9 @@
 #include <QReadWriteLock>
 #include <QSettings>
 #include <QRunnable>
+#ifdef AURORA_STREAM_RUNTIME
+#include <QSize>
+#endif
 
 class CopySafeReadWriteLock : public QReadWriteLock
 {
@@ -98,6 +101,9 @@ public:
     QString gfeVersion;
     QString appVersion;
     QVector<NvDisplayMode> displayModes;
+#ifdef AURORA_STREAM_RUNTIME
+    QSize auroraCaptureSize;
+#endif
     int maxLumaPixelsHEVC;
     int serverCodecModeSupport;
     QString gpuModel;

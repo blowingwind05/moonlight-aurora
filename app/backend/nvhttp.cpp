@@ -148,6 +148,9 @@ NvHTTP::getCurrentGame(QString serverInfo)
 QString
 NvHTTP::getServerInfo(NvLogLevel logLevel, bool fastFail)
 {
+#ifdef AURORA_STREAM_RUNTIME
+    m_PinnedServerInfo = false;
+#endif
     QString serverInfo;
 
     // Check if we have a pinned cert and HTTPS port for this host yet
@@ -164,6 +167,9 @@ NvHTTP::getServerInfo(NvLogLevel logLevel, bool fastFail)
                                                 logLevel);
             // Throws if the request failed
             verifyResponseStatus(serverInfo);
+#ifdef AURORA_STREAM_RUNTIME
+            m_PinnedServerInfo = true;
+#endif
         }
         catch (const GfeHttpResponseException& e)
         {

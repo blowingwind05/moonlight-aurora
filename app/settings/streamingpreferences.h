@@ -144,6 +144,11 @@ public:
     int height;
     int fps;
     int bitrateKbps;
+#ifdef AURORA_STREAM_RUNTIME
+    // Per invocation. These flags are intentionally outside the persisted preferences.
+    bool automaticCaptureSize = false;
+    bool automaticCaptureBitrate = false;
+#endif
     bool enableVsync;
     bool gameOptimizations;
     bool playAudioOnHost;

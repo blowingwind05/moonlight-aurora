@@ -120,6 +120,10 @@ public:
     QString
     getServerInfo(NvLogLevel logLevel, bool fastFail = false);
 
+#ifdef AURORA_STREAM_RUNTIME
+    bool hasPinnedServerInfo() const { return m_PinnedServerInfo; }
+#endif
+
     static
     void
     verifyResponseStatus(QString xml);
@@ -210,5 +214,8 @@ private:
     NvAddress m_Address;
     QNetworkAccessManager m_Nam;
     QSslCertificate m_ServerCert;
+#ifdef AURORA_STREAM_RUNTIME
+    bool m_PinnedServerInfo = false;
+#endif
     bool m_ExactEndpoint;
 };
