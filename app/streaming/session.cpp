@@ -1870,8 +1870,9 @@ void Session::execInternal()
         // Native Wayland: Capture on SDL_WINDOWEVENT_ENTER
         needsFirstEnterCapture = true;
     }
-    else if (!isEmbedded) {
-        // X11/XWayland: Capture after decoder creation
+    else if (!isEmbedded || m_Preferences->absoluteMouseMode) {
+        // Embedded desktop mode tracks the pointer immediately without locking it.
+        // X11/XWayland also activate after decoder creation.
         needsPostDecoderCreationCapture = true;
     }
 

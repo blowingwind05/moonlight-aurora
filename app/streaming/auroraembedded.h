@@ -170,6 +170,13 @@ private:
     static LRESULT CALLBACK focusOnClick(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     {
         switch (message) {
+        case WM_SETCURSOR:
+            // A foreign HWND can otherwise restore its Win32 class cursor after SDL hides it.
+            if (LOWORD(lParam) == HTCLIENT && SDL_ShowCursor(SDL_QUERY) == SDL_DISABLE) {
+                SetCursor(nullptr);
+                return TRUE;
+            }
+            break;
         case WM_LBUTTONDOWN:
         case WM_RBUTTONDOWN:
         case WM_MBUTTONDOWN:

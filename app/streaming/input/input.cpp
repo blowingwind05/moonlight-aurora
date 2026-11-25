@@ -396,6 +396,9 @@ void SdlInputHandler::setCaptureActive(bool active)
                 motionEvent.y = mouseY;
                 handleMouseMotionEvent(&motionEvent);
             }
+            else {
+                SDL_ShowCursor(SDL_ENABLE);
+            }
         }
     }
     else {
