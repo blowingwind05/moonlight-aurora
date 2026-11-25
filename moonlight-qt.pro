@@ -6,10 +6,6 @@ SUBDIRS = \
 
 # Build the dependencies in parallel before the final app
 app.depends = moonlight-common-c h264bitstream
-!contains(DEFINES, AURORA_STREAM_RUNTIME) {
-    SUBDIRS += qmdnsengine
-    app.depends += qmdnsengine
-}
 win32:!winrt {
     SUBDIRS += AntiHooking
     app.depends += AntiHooking

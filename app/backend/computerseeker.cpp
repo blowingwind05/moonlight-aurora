@@ -48,10 +48,7 @@ void ComputerSeeker::start(int timeout)
         return;
     }
 
-    // Seek desired computer by both connecting to it directly (this may fail
-    // if m_ComputerName is UUID, or the name that doesn't resolve to an IP
-    // address) and by polling it using mDNS, hopefully one of these methods
-    // would find the host
+    // Resolve the supplied target and poll previously saved hosts.
     m_ComputerManager->addNewHostManually(m_ComputerName);
 #ifndef AURORA_STREAM_RUNTIME
     m_ComputerManager->startPolling();
