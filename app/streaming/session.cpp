@@ -2484,6 +2484,13 @@ void Session::execInternal()
 
 DispatchDeferredCleanup:
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    // The macOS toolbar owns privacy state. Do not resume on another route
+    // while an operation is pending or the host's privacy state is uncertain.
+    if (!m_AuroraPrivacy || m_AuroraPrivacy->busy ||
+        (m_AuroraPrivacy->state != AuroraPrivacyState::Off &&
+         m_AuroraPrivacy->state != AuroraPrivacyState::Unavailable)) {
+        m_TransportLost.store(false);
+    }
     if (m_AuroraPrivacy) {
         m_AuroraPrivacy->live = false;
         m_AuroraPrivacy.reset();
