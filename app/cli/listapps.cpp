@@ -59,7 +59,7 @@ public:
                 m_State = StateSeekComputer;
                 m_ComputerManager = event.computerManager;
 
-                m_ComputerSeeker = new ComputerSeeker(m_ComputerManager, m_ComputerName, q);
+                m_ComputerSeeker = new ComputerSeeker(m_ComputerManager, m_ComputerName, q, true);
                 q->connect(m_ComputerSeeker, &ComputerSeeker::computerFound,
                            q, &Launcher::onComputerFound);
                 q->connect(m_ComputerSeeker, &ComputerSeeker::errorTimeout,

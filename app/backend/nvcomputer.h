@@ -53,6 +53,8 @@ public:
     bool
     wake() const;
 
+    void loadPairedApps();
+
     enum ReachabilityType
     {
         RI_UNKNOWN,

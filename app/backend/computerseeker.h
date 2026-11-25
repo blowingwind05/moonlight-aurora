@@ -10,7 +10,8 @@ class ComputerSeeker : public QObject
 {
     Q_OBJECT
 public:
-    explicit ComputerSeeker(ComputerManager *manager, QString computerName, QObject *parent = nullptr);
+    explicit ComputerSeeker(ComputerManager *manager, QString computerName, QObject *parent = nullptr,
+                            bool loadApps = false);
 
     void start(int timeout);
 
@@ -30,4 +31,5 @@ private:
     ComputerManager *m_ComputerManager;
     QString m_ComputerName;
     QTimer *m_TimeoutTimer;
+    bool m_LoadApps;
 };
