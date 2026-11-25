@@ -368,6 +368,66 @@ static int runAuroraBackgroundPair(const PairCommandLineParser& parser)
 }
 
 #ifdef AURORA_STREAM_RUNTIME
+static int runAuroraPower(int argc, char** argv)
+{
+    if (argc != 5) {
+        fputs("Usage: AuroraStream --aurora-runtime power <ip:port> <host-uuid> <restart|shutdown>\n", stderr);
+        return 2;
+    }
+#ifdef Q_OS_MACOS
+    qputenv("QT_SSL_USE_TEMPORARY_KEYCHAIN", "1");
+#endif
+    QCoreApplication app(argc, argv);
+    const auto args = app.arguments();
+    const auto action = args[4];
+    const auto endpoint = QRegularExpression(QStringLiteral(
+        R"(\A(?:\[([0-9A-Fa-f:.]+)\]|([0-9]{1,3}(?:\.[0-9]{1,3}){3})):([0-9]{1,5})\z)")).match(args[2]);
+    const QHostAddress address(endpoint.captured(1).isEmpty() ? endpoint.captured(2) : endpoint.captured(1));
+    const int port = endpoint.captured(3).toInt();
+    const auto uuid = args[3];
+    const auto uuidPattern = QRegularExpression(QStringLiteral(
+        R"(\A[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\z)"));
+    const int httpsPort = port + DEFAULT_HTTPS_PORT - DEFAULT_HTTP_PORT;
+    if (address.isNull() || port > 65535 || httpsPort <= 0 ||
+            !uuidPattern.match(uuid).hasMatch() || (action != "restart" && action != "shutdown")) {
+        fputs("Invalid Aurora power endpoint, host UUID, or action.\n", stderr);
+        return 2;
+    }
+    const NvAddress target(address, static_cast<uint16_t>(port));
+    const auto relay = NvHTTP::gameStreamRelayAddress();
+    const auto relayUuid = qEnvironmentVariable("AURORA_GAMESTREAM_HOST_UUID");
+    if ((!relay.isNull() && (!(relay == target) || uuid.compare(relayUuid, Qt::CaseInsensitive) != 0)) ||
+            (relay.isNull() && !relayUuid.isEmpty())) {
+        fputs("Aurora power target does not match its GameStream relay.\n", stderr);
+        return 2;
+    }
+
+    const auto certificate = ComputerManager::readSavedCertificate(uuid);
+    if (certificate.isNull()) {
+        fputs("Aurora has no saved pairing certificate for this host.\n", stderr);
+        return 3;
+    }
+    const auto clientIdentity = IdentityManager::readSavedSslConfig();
+    if (clientIdentity.localCertificate().isNull() || clientIdentity.privateKey().isNull()) {
+        fputs("Aurora has no saved client pairing credentials.\n", stderr);
+        return 3;
+    }
+    try {
+        NvHTTP http(target, static_cast<uint16_t>(httpsPort), certificate, true);
+        http.sendAuroraPower(action, clientIdentity);
+        puts("accepted");
+        return 0;
+    }
+    catch (const GfeHttpResponseException& error) {
+        fputs(error.getStatusCode() == 401 ? "Aurora power host certificate did not match.\n" :
+              "Aurora power request was not accepted by the host.\n", stderr);
+    }
+    catch (const QtNetworkReplyException&) {
+        fputs("Aurora power request failed or the host is unavailable.\n", stderr);
+    }
+    return 4;
+}
+
 static int runAuroraWallpaper(int argc, char** argv)
 {
     if (argc != 5) {
@@ -461,6 +521,9 @@ int main(int argc, char *argv[])
     }
 
 #ifdef AURORA_STREAM_RUNTIME
+    if (argc > 1 && std::strcmp(argv[1], "power") == 0) {
+        return runAuroraPower(argc, argv);
+    }
     if (argc > 1 && std::strcmp(argv[1], "wallpaper") == 0) {
         return runAuroraWallpaper(argc, argv);
     }
