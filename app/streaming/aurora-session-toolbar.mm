@@ -402,18 +402,36 @@ namespace {
 {
     [super layout];
     const CGFloat middle = NSMidY(self.bounds);
-    const CGFloat left = _caption.hidden ? std::floor((NSWidth(self.bounds) - 14) / 2) : 11;
+    constexpr CGFloat foot = AuroraSessionToolbarLayout::DisplayFoot;
+    const CGFloat left = _caption.hidden ? std::floor((NSWidth(self.bounds) - 14) / 2) : foot + 11;
     _glyph.frame = NSMakeRect(left, middle - 7, 14, 14);
     const CGFloat height = std::ceil(_caption.intrinsicContentSize.height);
     _caption.frame = NSMakeRect(left + 20, std::floor(middle - height / 2),
-                                std::max<CGFloat>(0, NSWidth(self.bounds) - left - 26), height);
+                                std::max<CGFloat>(0, NSWidth(self.bounds) - foot - left - 26), height);
 }
 
 - (void)drawRect:(NSRect)dirtyRect
 {
+    constexpr CGFloat foot = AuroraSessionToolbarLayout::DisplayFoot;
+    constexpr CGFloat topRadius = 10;
+    const CGFloat width = NSWidth(self.bounds);
+    const CGFloat height = NSHeight(self.bounds);
+    auto* outline = [NSBezierPath bezierPath];
+    [outline moveToPoint:NSMakePoint(0, 0)];
+    [outline appendBezierPathWithArcWithCenter:NSMakePoint(0, foot) radius:foot
+                                   startAngle:270 endAngle:360 clockwise:NO];
+    [outline lineToPoint:NSMakePoint(foot, height - topRadius)];
+    [outline appendBezierPathWithArcWithCenter:NSMakePoint(foot + topRadius, height - topRadius) radius:topRadius
+                                   startAngle:180 endAngle:90 clockwise:YES];
+    [outline lineToPoint:NSMakePoint(width - foot - topRadius, height)];
+    [outline appendBezierPathWithArcWithCenter:NSMakePoint(width - foot - topRadius, height - topRadius) radius:topRadius
+                                   startAngle:90 endAngle:0 clockwise:YES];
+    [outline lineToPoint:NSMakePoint(width - foot, foot)];
+    [outline appendBezierPathWithArcWithCenter:NSMakePoint(width, foot) radius:foot
+                                   startAngle:180 endAngle:270 clockwise:NO];
+    [outline closePath];
     [rgb(0xffffff) setFill];
-    [[NSBezierPath bezierPathWithRoundedRect:self.bounds xRadius:10 yRadius:10] fill];
-    NSRectFill(NSMakeRect(0, 0, NSWidth(self.bounds), 10));
+    [outline fill];
 }
 
 - (BOOL)mouseDownCanMoveWindow { return YES; }
@@ -616,7 +634,8 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     _statusChevron.frame = NSMakeRect(arrowX, 8, 9, 12);
 
     [_display showLabel:layout.display > 32];
-    _display.frame = NSMakeRect(NSMaxX(_status.frame) + 6, 0, layout.display, DisplayTabHeight);
+    _display.frame = NSMakeRect(NSMaxX(_status.frame) + 6, 0,
+                                layout.display + 2 * AuroraSessionToolbarLayout::DisplayFoot, DisplayTabHeight);
 
     [_controls showLabel:layout.controls > 32];
     [_disconnect showLabel:layout.disconnect > 32];

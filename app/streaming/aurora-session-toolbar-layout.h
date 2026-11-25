@@ -3,6 +3,8 @@
 #include <algorithm>
 
 struct AuroraSessionToolbarLayout {
+    static constexpr int DisplayFoot = 11;
+
     int device;
     int status;
     int display;
@@ -10,7 +12,7 @@ struct AuroraSessionToolbarLayout {
     int disconnect;
     bool brand;
 
-    int contextWidth() const { return device + status + display + 14; }
+    int contextWidth() const { return device + status + display + 2 * DisplayFoot + 14; }
     int actionsWidth() const { return controls + disconnect + 4 + (brand ? 36 : 0); }
 };
 
