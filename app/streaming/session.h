@@ -169,6 +169,7 @@ private:
     NvComputer* m_Computer;
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
     std::shared_ptr<AuroraSessionPrivacy> m_AuroraPrivacy;
+    SDL_atomic_t m_AuroraConnectionPoor{};
 #endif
     NvApp m_App;
     SDL_Window* m_Window;

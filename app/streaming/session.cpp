@@ -188,6 +188,18 @@ void Session::clConnectionStatusUpdate(int connectionStatus)
                 "Connection status update: %d",
                 connectionStatus);
 
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    if (connectionStatus == CONN_STATUS_OKAY || connectionStatus == CONN_STATUS_POOR) {
+        const int poor = connectionStatus == CONN_STATUS_POOR;
+        if (SDL_AtomicSet(&s_ActiveSession->m_AuroraConnectionPoor, poor) != poor) {
+            SDL_Event event = {};
+            event.type = SDL_USEREVENT;
+            event.user.code = static_cast<Sint32>(AuroraToolbarAction::ConnectionQualityChanged);
+            SDL_PushEvent(&event);
+        }
+    }
+#endif
+
     if (!s_ActiveSession->m_Preferences->connectionWarnings) {
         return;
     }
@@ -1322,7 +1334,15 @@ void Session::toggleFullscreen()
 #endif
 
     // Actually enter/leave fullscreen
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    if (!fullScreen) hideAuroraSessionToolbar(m_Window);
+    if (SDL_SetWindowFullscreen(m_Window, fullScreen ? m_FullScreenFlag : 0) != 0 && !fullScreen) {
+        installAuroraSessionToolbar(m_Window, m_Computer->name, SDL_AtomicGet(&m_AuroraConnectionPoor) != 0,
+                                    m_AuroraPrivacy);
+    }
+#else
     SDL_SetWindowFullscreen(m_Window, fullScreen ? m_FullScreenFlag : 0);
+#endif
 
 #ifdef Q_OS_DARWIN
     // SDL on macOS has a bug that causes the window size to be reset to crazy
@@ -1786,7 +1806,9 @@ void Session::execInternal()
     m_InputHandler->setWindow(m_Window);
 
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
-    const bool hasWindowedToolbar = !m_IsFullScreen && installAuroraSessionToolbar(m_Window, m_AuroraPrivacy);
+    const bool hasWindowedToolbar = !m_IsFullScreen &&
+        installAuroraSessionToolbar(m_Window, m_Computer->name, SDL_AtomicGet(&m_AuroraConnectionPoor) != 0,
+                                    m_AuroraPrivacy);
 #endif
 
     QSvgRenderer svgIconRenderer(QString(":/res/moonlight.svg"));
@@ -1947,6 +1969,15 @@ void Session::execInternal()
                     toggleFullscreen();
                     m_InputHandler->raiseAllKeys();
                 }
+                break;
+            case static_cast<Sint32>(AuroraToolbarAction::ReleaseMouse):
+                if (event.user.windowID == SDL_GetWindowID(m_Window)) {
+                    m_InputHandler->setCaptureActive(false);
+                    m_InputHandler->raiseAllKeys();
+                }
+                break;
+            case static_cast<Sint32>(AuroraToolbarAction::ConnectionQualityChanged):
+                setAuroraSessionToolbarConnectionQuality(m_Window, SDL_AtomicGet(&m_AuroraConnectionPoor) != 0);
                 break;
             case static_cast<Sint32>(AuroraToolbarAction::ToggleStats):
                 if (event.user.windowID == SDL_GetWindowID(m_Window)) {
@@ -2191,7 +2222,8 @@ void Session::execInternal()
 
             SDL_AtomicUnlock(&m_DecoderLock);
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
-            installAuroraSessionToolbar(m_Window, m_AuroraPrivacy);
+            installAuroraSessionToolbar(m_Window, m_Computer->name,
+                                        SDL_AtomicGet(&m_AuroraConnectionPoor) != 0, m_AuroraPrivacy);
 #endif
             break;
 

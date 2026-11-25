@@ -386,7 +386,8 @@ macx {
 
     contains(DEFINES, AURORA_STREAM_RUNTIME) {
         SOURCES += streaming/aurora-session-toolbar.mm streaming/aurora-session-privacy.cpp
-        HEADERS += streaming/aurora-session-toolbar.h streaming/aurora-session-privacy.h
+        HEADERS += streaming/aurora-session-toolbar.h streaming/aurora-session-privacy.h \
+                   streaming/aurora-session-toolbar-layout.h
         LIBS += -framework CoreFoundation
     }
 
