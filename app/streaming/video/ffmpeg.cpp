@@ -1,4 +1,7 @@
 #include <Limelight.h>
+#ifdef AURORA_STREAM_RUNTIME
+#include "streaming/aurora-connection-details.h"
+#endif
 #include "ffmpeg.h"
 #include "streaming/streamutils.h"
 #include "streaming/session.h"
@@ -1606,6 +1609,31 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
 
     // Flip stats windows roughly every second
     if (SDL_TICKS_PASSED(SDL_GetTicks(), m_ActiveWndVideoStats.measurementStartTimestamp + 1000)) {
+#ifdef AURORA_STREAM_RUNTIME
+        const auto& stats = m_ActiveWndVideoStats;
+        const Uint32 elapsedMs = SDL_GetTicks() - stats.measurementStartTimestamp;
+        if (stats.receivedFrames && elapsedMs) {
+            AuroraConnectionDetails details;
+            if (m_VideoDecoderCtx) {
+                details.width = m_VideoDecoderCtx->width;
+                details.height = m_VideoDecoderCtx->height;
+            }
+            details.codec = (m_VideoFormat & VIDEO_FORMAT_MASK_H264) ? 1 :
+                            (m_VideoFormat & VIDEO_FORMAT_MASK_H265) ? 2 :
+                            (m_VideoFormat & VIDEO_FORMAT_MASK_AV1) ? 3 : 0;
+            details.fpsHundredths = static_cast<int>(stats.receivedFrames * 100000.0 / elapsedMs);
+            details.videoKbps = static_cast<int>(stats.auroraReceivedVideoBytes * 8 / elapsedMs);
+            if (stats.totalFrames) {
+                details.lossHundredths = static_cast<int>(stats.networkDroppedFrames * 10000.0 / stats.totalFrames);
+            }
+            if (stats.decodedFrames) {
+                details.decodeMicroseconds = static_cast<int>(stats.totalDecodeTime * 1000.0 / stats.decodedFrames);
+            }
+            uint32_t rtt, variance;
+            if (LiGetEstimatedRttInfo(&rtt, &variance)) details.roundTripMs = static_cast<int>(rtt);
+            AuroraConnectionMonitor::instance().publish(details);
+        }
+#endif
         // Update overlay stats if it's enabled
         if (Session::get()->getOverlayManager().isOverlayEnabled(Overlay::OverlayDebug)) {
             VIDEO_STATS lastTwoWndStats = {};
@@ -1639,6 +1667,9 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
     m_ActiveWndVideoStats.maxHostProcessingLatency = qMax(m_ActiveWndVideoStats.maxHostProcessingLatency, du->frameHostProcessingLatency);
     m_ActiveWndVideoStats.totalHostProcessingLatency += du->frameHostProcessingLatency;
 
+#ifdef AURORA_STREAM_RUNTIME
+    if (du->fullLength > 0) m_ActiveWndVideoStats.auroraReceivedVideoBytes += du->fullLength;
+#endif
     m_ActiveWndVideoStats.receivedFrames++;
     m_ActiveWndVideoStats.totalFrames++;
 

@@ -1,4 +1,7 @@
 #include "session.h"
+#ifdef AURORA_STREAM_RUNTIME
+#include "aurora-connection-details.h"
+#endif
 #include "settings/streamingpreferences.h"
 #include "streaming/streamutils.h"
 #include "backend/richpresencemanager.h"
@@ -187,6 +190,11 @@ void Session::clRumble(unsigned short controllerNumber, unsigned short lowFreqMo
 
 void Session::clConnectionStatusUpdate(int connectionStatus)
 {
+#ifdef AURORA_STREAM_RUNTIME
+    if (connectionStatus == CONN_STATUS_POOR || connectionStatus == CONN_STATUS_OKAY) {
+        AuroraConnectionMonitor::instance().setPoor(connectionStatus == CONN_STATUS_POOR);
+    }
+#endif
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "Connection status update: %d",
                 connectionStatus);
