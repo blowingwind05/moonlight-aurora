@@ -144,7 +144,7 @@ private:
     NvComputer* m_Computer;
 };
 
-ComputerManager::ComputerManager(StreamingPreferences* prefs)
+ComputerManager::ComputerManager(StreamingPreferences* prefs, bool syncHostStorage)
     : m_Prefs(prefs),
       m_PollingRef(0),
       m_MdnsBrowser(nullptr),
@@ -175,7 +175,7 @@ ComputerManager::ComputerManager(StreamingPreferences* prefs)
     m_CompatFetcher.start();
 
     // Start the delayed flush thread to handle saveHosts() calls
-    m_DelayedFlushThread = new DelayedFlushThread(this);
+    m_DelayedFlushThread = new DelayedFlushThread(this, syncHostStorage);
     m_DelayedFlushThread->start();
 
     // To quit in a timely manner, we must block additional requests
@@ -186,22 +186,22 @@ ComputerManager::ComputerManager(StreamingPreferences* prefs)
     connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, &ComputerManager::handleAboutToQuit);
 }
 
-ComputerManager::~ComputerManager()
+bool ComputerManager::finishSavingHosts()
 {
-    // Stop the delayed flush thread before acquiring the lock in write mode
-    // to avoid deadlocking with a flush that needs the lock in read mode.
     {
-        // Wake the delayed flush thread
+        QMutexLocker lock(&m_DelayedFlushMutex);
         m_DelayedFlushThread->requestInterruption();
         m_DelayedFlushCondition.wakeOne();
-
-        // Wait for it to terminate (and finish any pending flush)
-        m_DelayedFlushThread->wait();
-        delete m_DelayedFlushThread;
-
-        // Delayed flushes should have completed by now
-        Q_ASSERT(!m_NeedsDelayedFlush);
     }
+    m_DelayedFlushThread->wait();
+    Q_ASSERT(!m_NeedsDelayedFlush);
+    return m_DelayedFlushThread->m_FlushSucceeded;
+}
+
+ComputerManager::~ComputerManager()
+{
+    finishSavingHosts();
+    delete m_DelayedFlushThread;
 
     QWriteLocker lock(&m_Lock);
 
@@ -293,6 +293,10 @@ void DelayedFlushThread::run() {
 
             // Finally, delete the backup copy
             settings.remove(SER_HOSTS_BACKUP);
+            if (m_SyncHostStorage) {
+                settings.sync();
+                m_FlushSucceeded = settings.status() == QSettings::NoError;
+            }
         }
     }
 }
@@ -561,32 +565,42 @@ class PendingPairingTask : public QObject, public QRunnable
     Q_OBJECT
 
 public:
-    PendingPairingTask(ComputerManager* computerManager, NvComputer* computer, QString pin)
+    PendingPairingTask(ComputerManager* computerManager, NvComputer* computer, QString pin,
+                       QString deviceName, NvAddress pairAddress)
         : m_ComputerManager(computerManager),
           m_Computer(computer),
-          m_Pin(pin)
+          m_Pin(pin),
+          m_DeviceName(deviceName),
+          m_PairAddress(pairAddress)
     {
         connect(this, &PendingPairingTask::pairingCompleted,
                 computerManager, &ComputerManager::pairingCompleted);
+        connect(this, &PendingPairingTask::hostAlreadyPaired,
+                computerManager, &ComputerManager::hostAlreadyPaired);
     }
 
 signals:
     void pairingCompleted(NvComputer* computer, QString error);
+    void hostAlreadyPaired();
 
 private:
     void run()
     {
-        NvPairingManager pairingManager(m_Computer);
+        NvPairingManager pairingManager(m_Computer, m_PairAddress);
 
         try {
-           NvPairingManager::PairState result = pairingManager.pair(m_Computer->appVersion, m_Pin, m_Computer->serverCert);
+           const bool exactEndpoint = !m_PairAddress.isNull();
+           QSslCertificate pairedCertificate;
+           NvPairingManager::PairState result = pairingManager.pair(
+               exactEndpoint ? QString() : m_Computer->appVersion, m_Pin,
+               exactEndpoint ? pairedCertificate : m_Computer->serverCert, m_DeviceName);
            switch (result)
            {
            case NvPairingManager::PairState::PIN_WRONG:
                emit pairingCompleted(m_Computer, tr("The PIN from the PC didn't match. Please try again."));
                break;
            case NvPairingManager::PairState::FAILED:
-               if (m_Computer->currentGameId != 0) {
+                if (!exactEndpoint && m_Computer->currentGameId != 0) {
                    emit pairingCompleted(m_Computer, tr("You cannot pair while a previous session is still running on the host PC. Quit any running games or reboot the host PC, then try pairing again."));
                }
                else {
@@ -596,7 +610,14 @@ private:
            case NvPairingManager::PairState::ALREADY_IN_PROGRESS:
                emit pairingCompleted(m_Computer, tr("Another pairing attempt is already in progress."));
                break;
+            case NvPairingManager::PairState::ALREADY_PAIRED:
+                emit hostAlreadyPaired();
+                break;
            case NvPairingManager::PairState::PAIRED:
+                if (exactEndpoint) {
+                    QWriteLocker lock(&m_Computer->lock);
+                    m_Computer->serverCert = pairedCertificate;
+                }
                // Persist the newly pinned server certificate for this host
                m_ComputerManager->saveHost(m_Computer);
 
@@ -613,13 +634,15 @@ private:
     ComputerManager* m_ComputerManager;
     NvComputer* m_Computer;
     QString m_Pin;
+    QString m_DeviceName;
+    NvAddress m_PairAddress;
 };
 
-void ComputerManager::pairHost(NvComputer* computer, QString pin)
+void ComputerManager::pairHost(NvComputer* computer, QString pin, QString deviceName, NvAddress pairAddress)
 {
     // Punt to a worker thread to avoid stalling the
     // UI while waiting for pairing to complete
-    PendingPairingTask* pairing = new PendingPairingTask(this, computer, pin);
+    PendingPairingTask* pairing = new PendingPairingTask(this, computer, pin, deviceName, pairAddress);
     QThreadPool::globalInstance()->start(pairing);
 }
 

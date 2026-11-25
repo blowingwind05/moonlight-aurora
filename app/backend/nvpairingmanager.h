@@ -14,15 +14,16 @@ public:
         PAIRED,
         PIN_WRONG,
         FAILED,
-        ALREADY_IN_PROGRESS
+        ALREADY_IN_PROGRESS,
+        ALREADY_PAIRED
     };
 
-    explicit NvPairingManager(NvComputer* computer);
+    explicit NvPairingManager(NvComputer* computer, const NvAddress& pairAddress);
 
     ~NvPairingManager();
 
     PairState
-    pair(QString appVersion, QString pin, QSslCertificate& serverCert);
+    pair(QString appVersion, QString pin, QSslCertificate& serverCert, const QString& deviceName);
 
 private:
     QByteArray
@@ -47,6 +48,8 @@ private:
     signMessage(const QByteArray& message);
 
     NvHTTP m_Http;
+    bool m_ExactEndpoint;
+    QString m_ExpectedHostId;
     X509* m_Cert;
     EVP_PKEY* m_PrivateKey;
 };

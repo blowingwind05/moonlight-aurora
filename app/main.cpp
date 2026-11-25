@@ -12,6 +12,7 @@
 #include <QElapsedTimer>
 #include <QTemporaryFile>
 #include <QRegularExpression>
+#include <QTimer>
 
 // Don't let SDL hook our main function, since Qt is already
 // doing the same thing. This needs to be before any headers
@@ -274,6 +275,41 @@ LONG WINAPI UnhandledExceptionHandler(struct _EXCEPTION_POINTERS *ExceptionInfo)
 }
 
 #endif
+
+static int runAuroraBackgroundPair(const PairCommandLineParser& parser)
+{
+    IdentityManager::get();
+    ComputerManager manager(StreamingPreferences::get(), true);
+    const auto address = parser.getAuroraPairAddress();
+    CliPair::Launcher launcher(address.toString(), parser.getPredefinedPin(), nullptr,
+                               QStringLiteral("aurora-") + parser.getAuroraPairId(), address);
+
+    int result = 1;
+    QObject::connect(&launcher, &CliPair::Launcher::success, &launcher, [&result]() {
+        result = 0;
+        QCoreApplication::quit();
+    });
+    QObject::connect(&launcher, &CliPair::Launcher::alreadyPaired, &launcher, [&result]() {
+        result = 2;
+        QCoreApplication::quit();
+    });
+    QObject::connect(&launcher, &CliPair::Launcher::failed, &launcher, [](const QString& message) {
+        fprintf(stderr, "%s\n", qUtf8Printable(message));
+        QCoreApplication::quit();
+    });
+    QTimer::singleShot(0, &launcher, [&launcher, &manager]() {
+        launcher.execute(&manager);
+    });
+
+    QCoreApplication::exec();
+    QThreadPool::globalInstance()->waitForDone();
+    if (!manager.finishSavingHosts() && result == 0) {
+        fputs("Moonlight could not sync the paired host settings.\n", stderr);
+        result = 1;
+    }
+    fflush(stderr);
+    return result;
+}
 
 int main(int argc, char *argv[])
 {
@@ -563,12 +599,16 @@ int main(int argc, char *argv[])
 #endif
 
     GlobalCommandLineParser parser;
-    GlobalCommandLineParser::ParseResult commandLineParserResult = parser.parse(app.arguments());
-    switch (commandLineParserResult) {
-    case GlobalCommandLineParser::ListRequested:
+    const auto arguments = app.arguments();
+    GlobalCommandLineParser::ParseResult commandLineParserResult = parser.parse(arguments);
+    if (commandLineParserResult == GlobalCommandLineParser::ListRequested) {
         // Don't log to the console since it will jumble the command output
         s_SuppressVerboseOutput = true;
+    }
 #ifdef Q_OS_WIN32
+    if (commandLineParserResult == GlobalCommandLineParser::ListRequested ||
+            (commandLineParserResult == GlobalCommandLineParser::PairRequested &&
+             arguments.contains(QStringLiteral("--aurora-background")))) {
         // If we don't have stdout or stderr handles (which will normally be the case
         // since we're a /SUBSYSTEM:WINDOWS app), attach to our parent console and use
         // that for stdout and stderr.
@@ -586,11 +626,8 @@ int main(int argc, char *argv[])
                 setvbuf(stderr, NULL, _IONBF, 0);
             }
         }
-#endif
-        break;
-    default:
-        break;
     }
+#endif
 
     SDL_version compileVersion;
     SDL_VERSION(&compileVersion);
@@ -606,6 +643,14 @@ int main(int argc, char *argv[])
 
     // Apply the initial translation based on user preference
     StreamingPreferences::get()->retranslate();
+
+    PairCommandLineParser pairParser;
+    if (commandLineParserResult == GlobalCommandLineParser::PairRequested) {
+        pairParser.parse(arguments);
+        if (!pairParser.getAuroraPairId().isEmpty()) {
+            return runAuroraBackgroundPair(pairParser);
+        }
+    }
 
     // Trickily declare the translation for dialog buttons
     QCoreApplication::translate("QPlatformTheme", "&Yes");
@@ -743,8 +788,6 @@ int main(int argc, char *argv[])
     case GlobalCommandLineParser::PairRequested:
         {
             initialView = "qrc:/gui/CliPair.qml";
-            PairCommandLineParser pairParser;
-            pairParser.parse(app.arguments());
             auto launcher = new CliPair::Launcher(pairParser.getHost(), pairParser.getPredefinedPin(), &app);
             engine.rootContext()->setContextProperty("launcher", launcher);
             break;

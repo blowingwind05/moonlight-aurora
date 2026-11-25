@@ -23,10 +23,11 @@ class ComputerManager;
 class DelayedFlushThread : public QThread
 {
     Q_OBJECT
+    friend class ComputerManager;
 
 public:
-    DelayedFlushThread(ComputerManager* cm)
-        : m_ComputerManager(cm)
+    DelayedFlushThread(ComputerManager* cm, bool syncHostStorage)
+        : m_ComputerManager(cm), m_SyncHostStorage(syncHostStorage)
     {
         setObjectName("CM Delayed Flush Thread");
     }
@@ -35,6 +36,8 @@ public:
 
 private:
     ComputerManager* m_ComputerManager;
+    bool m_SyncHostStorage;
+    bool m_FlushSucceeded = true;
 };
 
 class MdnsPendingComputer : public QObject
@@ -218,7 +221,7 @@ class ComputerManager : public QObject
     friend class DelayedFlushThread;
 
 public:
-    explicit ComputerManager(StreamingPreferences* prefs);
+    explicit ComputerManager(StreamingPreferences* prefs, bool syncHostStorage = false);
 
     virtual ~ComputerManager();
 
@@ -232,7 +235,9 @@ public:
 
     QString generatePinString();
 
-    void pairHost(NvComputer* computer, QString pin);
+    void pairHost(NvComputer* computer, QString pin, QString deviceName = {}, NvAddress pairAddress = {});
+
+    bool finishSavingHosts();
 
     void quitRunningApp(NvComputer* computer);
 
@@ -249,6 +254,7 @@ signals:
     void computerStateChanged(NvComputer* computer);
 
     void pairingCompleted(NvComputer* computer, QString error);
+    void hostAlreadyPaired();
 
     void computerAddCompleted(QVariant success, QVariant detectedPortBlocking);
 

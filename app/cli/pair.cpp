@@ -56,6 +56,14 @@ public:
                 m_ComputerManager = event.computerManager;
                 q->connect(m_ComputerManager, &ComputerManager::pairingCompleted,
                            q, &Launcher::onPairingCompleted);
+                if (!m_PairAddress.isNull()) {
+                    q->connect(m_ComputerManager, &ComputerManager::hostAlreadyPaired, q, [this, q]() {
+                        if (m_State == StatePairing) {
+                            m_State = StateComplete;
+                            emit q->alreadyPaired();
+                        }
+                    });
+                }
 
                 // If we weren't provided a predefined PIN, generate one now
                 if (m_PredefinedPin.isEmpty()) {
@@ -75,7 +83,7 @@ public:
         // Occurs when searched computer is found
         case Event::ComputerFound:
             if (m_State == StateSeekComputer) {
-                if (event.computer->pairState == NvComputer::PS_PAIRED) {
+                if (m_PairAddress.isNull() && event.computer->pairState == NvComputer::PS_PAIRED) {
                     m_State = StateFailure;
                     QString msg = QObject::tr("%1 is already paired").arg(event.computer->name);
                     emit q->failed(msg);
@@ -84,7 +92,7 @@ public:
                     Q_ASSERT(!m_PredefinedPin.isEmpty());
 
                     m_State = StatePairing;
-                    m_ComputerManager->pairHost(event.computer, m_PredefinedPin);
+                    m_ComputerManager->pairHost(event.computer, m_PredefinedPin, m_DeviceName, m_PairAddress);
                     emit q->pairing(event.computer->name, m_PredefinedPin);
                 }
             }
@@ -115,6 +123,8 @@ public:
     Launcher *q_ptr;
     QString m_ComputerName;
     QString m_PredefinedPin;
+    QString m_DeviceName;
+    NvAddress m_PairAddress;
     ComputerManager *m_ComputerManager;
     ComputerSeeker *m_ComputerSeeker;
     NvComputer *m_Computer;
@@ -122,13 +132,15 @@ public:
     QTimer *m_TimeoutTimer;
 };
 
-Launcher::Launcher(QString computer, QString predefinedPin, QObject *parent)
+Launcher::Launcher(QString computer, QString predefinedPin, QObject *parent, QString deviceName, NvAddress pairAddress)
     : QObject(parent),
       m_DPtr(new LauncherPrivate(this))
 {
     Q_D(Launcher);
     d->m_ComputerName = computer;
     d->m_PredefinedPin = predefinedPin;
+    d->m_DeviceName = deviceName;
+    d->m_PairAddress = pairAddress;
     d->m_State = StateInit;
     d->m_TimeoutTimer = new QTimer(this);
     d->m_TimeoutTimer->setSingleShot(true);

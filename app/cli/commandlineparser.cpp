@@ -2,6 +2,7 @@
 
 #include <QCommandLineParser>
 #include <QRegularExpression>
+#include <QUrl>
 
 #if defined(Q_OS_WIN)
 #include <qt_windows.h>
@@ -60,15 +61,19 @@ public:
     void showMessage(QString message, MessageType type) const
     {
     #if defined(Q_OS_WIN32)
-        UINT flags = MB_OK | MB_TOPMOST | MB_SETFOREGROUND;
-        flags |= (type == Info ? MB_ICONINFORMATION : MB_ICONERROR);
-        QString title = "Moonlight";
-        MessageBoxW(nullptr, reinterpret_cast<const wchar_t *>(message.utf16()),
-                    reinterpret_cast<const wchar_t *>(title.utf16()), flags);
+        if (showDialogs) {
+            UINT flags = MB_OK | MB_TOPMOST | MB_SETFOREGROUND;
+            flags |= (type == Info ? MB_ICONINFORMATION : MB_ICONERROR);
+            QString title = "Moonlight";
+            MessageBoxW(nullptr, reinterpret_cast<const wchar_t *>(message.utf16()),
+                        reinterpret_cast<const wchar_t *>(title.utf16()), flags);
+        }
     #endif
         message = message.endsWith('\n') ? message : message + '\n';
         fputs(qPrintable(message), type == Info ? stdout : stderr);
     }
+
+    bool showDialogs = true;
 
     [[ noreturn ]] void showInfo(QString message) const
     {
@@ -256,9 +261,34 @@ PairCommandLineParser::~PairCommandLineParser()
 {
 }
 
+static NvAddress parseAuroraPairAddress(const QString& host)
+{
+    QString authority = host;
+    if (!host.startsWith('[') && host.count(':') > 1) {
+        authority = QStringLiteral("[%1]").arg(host);
+    }
+
+    const QRegularExpression literalPattern(QStringLiteral(
+        "\\A(\\[[0-9a-fA-F:.]+\\]|[0-9]+(?:\\.[0-9]+){3})(?::[0-9]{1,5})?\\z"));
+    const auto match = literalPattern.match(authority);
+    if (!match.hasMatch()) {
+        return NvAddress();
+    }
+
+    const QUrl url(QStringLiteral("moonlight://") + authority, QUrl::StrictMode);
+    const QHostAddress address(url.host());
+    const int port = url.port(DEFAULT_HTTP_PORT);
+    if (!url.isValid() || address.isNull() || port <= 0 || port > 65535 ||
+            (address.protocol() == QAbstractSocket::IPv4Protocol && address.toString() != match.captured(1))) {
+        return NvAddress();
+    }
+    return NvAddress(address, static_cast<uint16_t>(port));
+}
+
 void PairCommandLineParser::parse(const QStringList &args)
 {
     CommandLineParser parser;
+    parser.showDialogs = !args.contains(QStringLiteral("--aurora-background"));
     parser.setupCommonOptions();
     parser.setApplicationDescription(
         "\n"
@@ -267,6 +297,8 @@ void PairCommandLineParser::parse(const QStringList &args)
     parser.addPositionalArgument("pair", "pair host");
     parser.addPositionalArgument("host", "Host computer name, UUID, or IP address", "<host>");
     parser.addValueOption("pin", "4 digit pairing PIN");
+    parser.addFlagOption("aurora-background", "Aurora background pairing without a window");
+    parser.addValueOption("aurora-pair-id", "Aurora pairing correlation ID");
 
     if (!parser.parse(args)) {
         parser.showError(parser.errorText());
@@ -285,7 +317,30 @@ void PairCommandLineParser::parse(const QStringList &args)
     }
     m_Host = parser.positionalArguments().at(1);
     m_PredefinedPin = parser.value("pin");
-    if (!m_PredefinedPin.isEmpty() && m_PredefinedPin.length() != 4) {
+    m_AuroraPairId.clear();
+    m_AuroraPairAddress = NvAddress();
+    if (parser.isSet("aurora-background")) {
+        if (posArgs.size() != 2 || m_Host.trimmed().isEmpty()) {
+            parser.showError("Aurora background pairing requires exactly one host");
+        }
+        m_AuroraPairAddress = parseAuroraPairAddress(m_Host);
+        if (m_AuroraPairAddress.isNull()) {
+            parser.showError("Aurora background pairing requires an IPv4 or IPv6 literal with an optional port");
+        }
+        const auto pairIds = parser.values("aurora-pair-id");
+        const auto pins = parser.values("pin");
+        const QRegularExpression pairIdPattern(QStringLiteral("\\A[0-9a-f]{32}\\z"));
+        const QRegularExpression pinPattern(QStringLiteral("\\A[0-9]{4}\\z"));
+        if (pairIds.size() != 1 || !pairIdPattern.match(pairIds.first()).hasMatch()) {
+            parser.showError("--aurora-pair-id must contain exactly 32 lowercase hexadecimal characters");
+        }
+        if (pins.size() != 1 || !pinPattern.match(pins.first()).hasMatch()) {
+            parser.showError("Aurora background pairing requires --pin with exactly 4 ASCII digits");
+        }
+        m_AuroraPairId = pairIds.first();
+    } else if (parser.isSet("aurora-pair-id")) {
+        parser.showError("--aurora-pair-id requires --aurora-background");
+    } else if (!m_PredefinedPin.isEmpty() && m_PredefinedPin.length() != 4) {
         parser.showError("PIN must be 4 digits");
     }
 }
@@ -298,6 +353,16 @@ QString PairCommandLineParser::getHost() const
 QString PairCommandLineParser::getPredefinedPin() const
 {
     return m_PredefinedPin;
+}
+
+QString PairCommandLineParser::getAuroraPairId() const
+{
+    return m_AuroraPairId;
+}
+
+NvAddress PairCommandLineParser::getAuroraPairAddress() const
+{
+    return m_AuroraPairAddress;
 }
 
 StreamCommandLineParser::StreamCommandLineParser()
