@@ -49,6 +49,54 @@
 #include "streaming/session.h"
 #include "settings/streamingpreferences.h"
 #include "gui/sdlgamepadkeynavigation.h"
+#include "streaming/auroraembedded.h"
+
+#if defined(Q_OS_WIN32) && defined(AURORA_STREAM_RUNTIME)
+static void startAuroraEmbeddedStream(QGuiApplication& app, CliStartStream::Launcher* launcher,
+                                      StreamingPreferences* preferences)
+{
+    auto manager = new ComputerManager(preferences);
+    manager->setParent(&app);
+    auto stopTimer = new QTimer(launcher);
+    QObject::connect(stopTimer, &QTimer::timeout, &app, [&app]() {
+        if (AuroraEmbeddedSession::current().stopRequested()) {
+            app.quit();
+        }
+    });
+    auto reportFailure = [&app](const QString& message) {
+        qWarning().noquote() << message;
+        app.exit(1);
+    };
+    QObject::connect(launcher, &CliStartStream::Launcher::failed, &app, reportFailure);
+    QObject::connect(launcher, &CliStartStream::Launcher::appQuitRequired, &app, [reportFailure](const QString& name) {
+        reportFailure(QObject::tr("Close %1 on the host before starting the embedded stream.").arg(name));
+    });
+    QObject::connect(launcher, &CliStartStream::Launcher::sessionCreated, &app,
+                     [&app, stopTimer](const QString&, Session* session) {
+        stopTimer->stop();
+        session->setParent(&app);
+        auto reportSessionFailure = [session](const QString& message) {
+            qWarning().noquote() << message;
+            session->setProperty("auroraLaunchFailed", true);
+        };
+        QObject::connect(session, &Session::displayLaunchError, session, reportSessionFailure);
+        QObject::connect(session, &Session::stageFailed, session,
+                         [reportSessionFailure](const QString& stage, int errorCode, const QString&) {
+            reportSessionFailure(QObject::tr("Starting %1 failed: %2").arg(stage).arg(errorCode));
+        });
+        QObject::connect(session, &Session::readyForDeletion, &app, [&app, session]() {
+            app.exit(AuroraEmbeddedSession::current().attachmentFailed() ? AuroraEmbeddedSession::AttachmentFailed :
+                     (session->property("auroraLaunchFailed").toBool() ? 1 : 0));
+        }, Qt::QueuedConnection);
+        session->exec(nullptr);
+    }, Qt::QueuedConnection);
+
+    QTimer::singleShot(0, launcher, [launcher, manager, stopTimer]() {
+        stopTimer->start(80);
+        launcher->execute(manager);
+    });
+}
+#endif
 
 #if defined(Q_OS_WIN32)
 #define IS_UNSPECIFIED_HANDLE(x) ((x) == INVALID_HANDLE_VALUE || (x) == NULL)
@@ -366,6 +414,13 @@ int main(int argc, char *argv[])
     if (invocation >= 0) {
         return invocation;
     }
+#ifdef Q_OS_WIN32
+    const QByteArray invitation = qgetenv("AURORA_EMBEDDED_SESSION");
+    if (std::strcmp(argv[1], "stream") == 0 && !invitation.isEmpty() &&
+            !AuroraEmbeddedSession::current().configure(invitation)) {
+        return AuroraEmbeddedSession::AttachmentFailed;
+    }
+#endif
 #endif
     SDL_SetMainReady();
 
@@ -833,6 +888,15 @@ int main(int argc, char *argv[])
             QString host    = streamParser.getHost();
             QString appName = streamParser.getAppName();
             auto launcher   = new CliStartStream::Launcher(host, appName, preferences, &app);
+#if defined(Q_OS_WIN32) && defined(AURORA_STREAM_RUNTIME)
+            if (AuroraEmbeddedSession::current().enabled()) {
+                preferences->windowMode = StreamingPreferences::WM_WINDOWED;
+                preferences->captureSysKeysMode = StreamingPreferences::CSK_OFF;
+                startAuroraEmbeddedStream(app, launcher, preferences);
+                hasGUI = false;
+                break;
+            }
+#endif
             engine.rootContext()->setContextProperty("launcher", launcher);
             break;
         }

@@ -2,6 +2,7 @@
 #include "settings/streamingpreferences.h"
 #include "streaming/streamutils.h"
 #include "backend/richpresencemanager.h"
+#include "auroraembedded.h"
 
 #include <Limelight.h>
 #include <SDL.h>
@@ -1210,6 +1211,11 @@ void Session::getWindowDimensions(int& x, int& y,
 
 void Session::updateOptimalWindowDisplayMode()
 {
+#if defined(Q_OS_WIN32) && defined(AURORA_STREAM_RUNTIME)
+    if (AuroraEmbeddedSession::current().enabled()) {
+        return;
+    }
+#endif
     SDL_DisplayMode desktopMode, bestMode, mode;
     int displayIndex = SDL_GetWindowDisplayIndex(m_Window);
 
@@ -1299,6 +1305,14 @@ void Session::updateOptimalWindowDisplayMode()
 
 void Session::toggleFullscreen()
 {
+#if defined(Q_OS_WIN32) && defined(AURORA_STREAM_RUNTIME)
+    auto& embedded = AuroraEmbeddedSession::current();
+    if (embedded.enabled()) {
+        m_InputHandler->setCaptureActive(false);
+        embedded.toggleFullscreen();
+        return;
+    }
+#endif
     bool fullScreen = !(SDL_GetWindowFlags(m_Window) & m_FullScreenFlag);
 
 #if defined(Q_OS_WIN32) || defined(Q_OS_DARWIN)
@@ -1377,6 +1391,12 @@ bool Session::startConnectionAsync()
     // Wait 1.5 seconds before connecting to let the user
     // have time to read any messages present on the segue
     SDL_Delay(1500);
+
+#if defined(Q_OS_WIN32) && defined(AURORA_STREAM_RUNTIME)
+    if (AuroraEmbeddedSession::current().stopRequested()) {
+        return false;
+    }
+#endif
 
     // The UI should have ensured the old game was already quit
     // if we decide to stream a different game.
@@ -1484,6 +1504,11 @@ bool Session::startConnectionAsync()
         }
     }
 
+#if defined(Q_OS_WIN32) && defined(AURORA_STREAM_RUNTIME)
+    if (AuroraEmbeddedSession::current().stopRequested()) {
+        return false;
+    }
+#endif
     int err = LiStartConnection(&hostInfo, &m_StreamConfig, &k_ConnCallbacks,
                                 &m_VideoCallbacks, &m_AudioCallbacks,
                                 NULL, 0, NULL, 0);
@@ -1580,6 +1605,24 @@ void Session::execInternal()
         return;
     }
 
+    bool isEmbedded = false;
+#if defined(Q_OS_WIN32) && defined(AURORA_STREAM_RUNTIME)
+    auto& embedded = AuroraEmbeddedSession::current();
+    isEmbedded = embedded.enabled();
+    if (isEmbedded) {
+        m_IsFullScreen = false;
+        if (!embedded.stopRequested()) {
+            m_Window = embedded.createWindow();
+        }
+        if (!m_Window) {
+            SDL_QuitSubSystem(SDL_INIT_VIDEO);
+            emit sessionFinished(0);
+            emit readyForDeletion();
+            return;
+        }
+    }
+#endif
+
     // Wait for any old session to finish cleanup
     s_ActiveSessionSemaphore.acquire();
 
@@ -1595,6 +1638,11 @@ void Session::execInternal()
         // Kick off the async connection thread while we sit here and pump the event loop
         asyncConnThread.start();
         while (!asyncConnThread.wait(10)) {
+#if defined(Q_OS_WIN32) && defined(AURORA_STREAM_RUNTIME)
+            if (isEmbedded && embedded.stopRequested()) {
+                LiInterruptConnection();
+            }
+#endif
             QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
             QCoreApplication::sendPostedEvents();
         }
@@ -1615,6 +1663,11 @@ void Session::execInternal()
     if (!m_AsyncConnectionSuccess) {
         delete m_InputHandler;
         m_InputHandler = nullptr;
+#if defined(Q_OS_WIN32) && defined(AURORA_STREAM_RUNTIME)
+        if (isEmbedded) {
+            embedded.destroyWindow(m_Window);
+        }
+#endif
         SDL_QuitSubSystem(SDL_INIT_VIDEO);
         QThreadPool::globalInstance()->start(new DeferredSessionCleanupTask(this));
         return;
@@ -1668,12 +1721,14 @@ void Session::execInternal()
     std::string windowName = QString(m_Computer->name + " - Moonlight").toStdString();
 #endif
 
-    m_Window = SDL_CreateWindow(windowName.c_str(),
-                                x,
-                                y,
-                                width,
-                                height,
-                                defaultWindowFlags | StreamUtils::getPlatformWindowFlags());
+    if (!isEmbedded) {
+        m_Window = SDL_CreateWindow(windowName.c_str(),
+                                    x,
+                                    y,
+                                    width,
+                                    height,
+                                    defaultWindowFlags | StreamUtils::getPlatformWindowFlags());
+    }
     if (!m_Window) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "SDL_CreateWindow() failed with platform flags: %s",
@@ -1757,7 +1812,7 @@ void Session::execInternal()
                                                                   SDL_PIXELFORMAT_RGBA32);
 #ifndef Q_OS_DARWIN
     // Other platforms seem to preserve our Qt icon when creating a new window.
-    if (iconSurface != nullptr) {
+    if (!isEmbedded && iconSurface != nullptr) {
         // This must be called before entering full-screen mode on Windows
         // or our icon will not persist when toggling to windowed mode
         SDL_SetWindowIcon(m_Window, iconSurface);
@@ -1803,7 +1858,7 @@ void Session::execInternal()
         // Native Wayland: Capture on SDL_WINDOWEVENT_ENTER
         needsFirstEnterCapture = true;
     }
-    else {
+    else if (!isEmbedded) {
         // X11/XWayland: Capture after decoder creation
         needsPostDecoderCreationCapture = true;
     }
@@ -1835,6 +1890,13 @@ void Session::execInternal()
     // (m_UnexpectedTermination is set back to true).
     m_UnexpectedTermination = false;
 
+#if defined(Q_OS_WIN32) && defined(AURORA_STREAM_RUNTIME)
+    if (isEmbedded) {
+        embedded.show(m_Window);
+    }
+    Uint32 nextEmbeddedPoll = SDL_GetTicks();
+#endif
+
     // Start rich presence to indicate we're in game
     RichPresenceManager presence(*m_Preferences, m_App.name);
 
@@ -1845,6 +1907,15 @@ void Session::execInternal()
     // because we want to suspend all Qt processing until the stream is over.
     SDL_Event event;
     for (;;) {
+#if defined(Q_OS_WIN32) && defined(AURORA_STREAM_RUNTIME)
+        if (isEmbedded && SDL_TICKS_PASSED(SDL_GetTicks(), nextEmbeddedPoll)) {
+            if (embedded.stopRequested()) {
+                goto DispatchDeferredCleanup;
+            }
+            embedded.resize();
+            nextEmbeddedPoll = SDL_GetTicks() + 80;
+        }
+#endif
 #if SDL_VERSION_ATLEAST(2, 0, 18) && !defined(STEAM_LINK)
         // SDL 2.0.18 has a proper wait event implementation that uses platform
         // support to block on events rather than polling on Windows, macOS, X11,
@@ -1855,7 +1926,7 @@ void Session::execInternal()
         // NB: This behavior was introduced in SDL 2.0.16, but had a few critical
         // issues that could cause indefinite timeouts, delayed joystick detection,
         // and other problems.
-        if (!SDL_WaitEventTimeout(&event, 1000)) {
+        if (!SDL_WaitEventTimeout(&event, isEmbedded ? 80 : 1000)) {
             presence.runCallbacks();
             continue;
         }
@@ -1919,6 +1990,11 @@ void Session::execInternal()
             break;
 
         case SDL_WINDOWEVENT:
+#if defined(Q_OS_WIN32) && defined(AURORA_STREAM_RUNTIME)
+            if (isEmbedded && event.window.windowID != SDL_GetWindowID(m_Window)) {
+                break;
+            }
+#endif
             // Early handling of some events
             switch (event.window.event) {
             case SDL_WINDOWEVENT_FOCUS_LOST:
@@ -2106,6 +2182,11 @@ void Session::execInternal()
                     m_InputHandler->setCaptureActive(true);
                     needsPostDecoderCreationCapture = false;
                 }
+#if defined(Q_OS_WIN32) && defined(AURORA_STREAM_RUNTIME)
+                if (isEmbedded) {
+                    embedded.ready();
+                }
+#endif
             }
 
             // Request an IDR frame to complete the reset
@@ -2229,7 +2310,15 @@ DispatchDeferredCleanup:
 
     // This must be called after the decoder is deleted, because
     // the renderer may want to interact with the window
-    SDL_DestroyWindow(m_Window);
+#if defined(Q_OS_WIN32) && defined(AURORA_STREAM_RUNTIME)
+    if (isEmbedded) {
+        embedded.destroyWindow(m_Window);
+    }
+    else
+#endif
+    {
+        SDL_DestroyWindow(m_Window);
+    }
 
     if (iconSurface != nullptr) {
         SDL_FreeSurface(iconSurface);

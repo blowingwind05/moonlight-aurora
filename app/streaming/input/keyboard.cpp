@@ -1,4 +1,5 @@
 #include "streaming/session.h"
+#include "streaming/auroraembedded.h"
 
 #include <Limelight.h>
 #include <SDL.h>
@@ -89,6 +90,12 @@ void SdlInputHandler::performSpecialKeyCombo(KeyCombo combo)
     case KeyComboToggleMinimize:
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "Detected minimize combo");
+#if defined(Q_OS_WIN32) && defined(AURORA_STREAM_RUNTIME)
+        if (AuroraEmbeddedSession::current().enabled()) {
+            AuroraEmbeddedSession::current().minimize();
+            break;
+        }
+#endif
         SDL_MinimizeWindow(m_Window);
         break;
 
