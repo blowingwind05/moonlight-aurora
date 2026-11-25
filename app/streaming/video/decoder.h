@@ -19,6 +19,9 @@ typedef struct _VIDEO_STATS {
     uint16_t maxHostProcessingLatency;
     uint32_t totalHostProcessingLatency;
     uint32_t framesWithHostProcessingLatency;
+#ifdef AURORA_STREAM_RUNTIME
+    uint64_t auroraReceivedVideoBytes;
+#endif
     uint32_t totalReassemblyTime;
     uint32_t totalDecodeTime;
     uint32_t totalPacerTime;
