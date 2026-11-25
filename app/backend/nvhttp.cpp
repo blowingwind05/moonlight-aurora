@@ -22,6 +22,8 @@
 #define RESUME_TIMEOUT_MS 30000
 #define QUIT_TIMEOUT_MS 30000
 
+static constexpr qint64 AURORA_PAIRED_RESPONSE_LIMIT = 64;
+
 NvHTTP::NvHTTP(NvAddress address, uint16_t httpsPort, QSslCertificate serverCert, bool exactEndpoint) :
     m_ServerCert(serverCert),
     m_ExactEndpoint(exactEndpoint || gameStreamRelayBase(address) != 0)
@@ -424,20 +426,45 @@ QByteArray NvHTTP::getAuroraWallpaper(const QString& revision)
     return reply->readAll();
 }
 
+QNetworkReply* NvHTTP::openAuroraPairedPost(const QString& command, const QString& action,
+                                           const QSslConfiguration& clientIdentity)
+{
+    if (!m_ExactEndpoint || m_ServerCert.isNull() || m_BaseUrlHttps.scheme() != "https") {
+        throw GfeHttpResponseException(400, "Invalid Aurora paired endpoint");
+    }
+
+    return openConnection(m_BaseUrlHttps, command, "action=" + action, REQUEST_TIMEOUT_MS, NVLL_NONE,
+                          AURORA_PAIRED_RESPONSE_LIMIT, &clientIdentity);
+}
+
 void NvHTTP::sendAuroraPower(const QString& action, const QSslConfiguration& clientIdentity)
 {
-    if (!m_ExactEndpoint || m_ServerCert.isNull() || (action != "restart" && action != "shutdown")) {
+    if (action != "restart" && action != "shutdown") {
         throw GfeHttpResponseException(400, "Invalid Aurora power request");
     }
 
-    constexpr qint64 maxBytes = 64;
-    QScopedPointer<QNetworkReply> reply(openConnection(m_BaseUrlHttps, "aurora-power",
-        "action=" + action, REQUEST_TIMEOUT_MS, NVLL_NONE, maxBytes, &clientIdentity));
+    QScopedPointer<QNetworkReply> reply(openAuroraPairedPost("aurora-power", action, clientIdentity));
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-    if (status < 200 || status >= 300 || reply->bytesAvailable() > maxBytes ||
+    if (status < 200 || status >= 300 || reply->bytesAvailable() > AURORA_PAIRED_RESPONSE_LIMIT ||
             reply->readAll().trimmed() != "accepted") {
         throw GfeHttpResponseException(400, "Invalid Aurora power response");
     }
+}
+
+QByteArray NvHTTP::sendAuroraPrivacy(const QString& action, const QSslConfiguration& clientIdentity)
+{
+    if (action != "status" && action != "on" && action != "off") {
+        throw GfeHttpResponseException(400, "Invalid Aurora privacy request");
+    }
+
+    QScopedPointer<QNetworkReply> reply(openAuroraPairedPost("aurora-session-privacy", action, clientIdentity));
+    const auto response = reply->read(AURORA_PAIRED_RESPONSE_LIMIT + 1);
+    if (reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 200 ||
+            (response != QByteArrayLiteral("on") && response != QByteArrayLiteral("off") &&
+             response != QByteArrayLiteral("unavailable"))) {
+        throw GfeHttpResponseException(400, "Invalid Aurora privacy response");
+    }
+    return response;
 }
 
 QByteArray
@@ -594,13 +621,14 @@ NvHTTP::openConnection(QUrl baseUrl,
 
     QNetworkReply* reply = pinnedPostIdentity ? m_Nam.post(request, QByteArray()) : m_Nam.get(request);
     if (pinnedPostIdentity) {
-        connect(reply, &QNetworkReply::encrypted, reply, [this, reply, powerHandshakeSeen = false]() mutable {
-            // Qt emits this before writing the HTTP request. Never resend a power POST
+        reply->setReadBufferSize(maxBytes + 1);
+        connect(reply, &QNetworkReply::encrypted, reply, [this, reply, handshakeSeen = false]() mutable {
+            // Qt emits this before writing the HTTP request. Do not resend a paired POST
             // on a new connection if the response was interrupted.
-            if (powerHandshakeSeen || reply->sslConfiguration().peerCertificate() != m_ServerCert) {
+            if (handshakeSeen || reply->sslConfiguration().peerCertificate() != m_ServerCert) {
                 reply->abort();
             }
-            powerHandshakeSeen = true;
+            handshakeSeen = true;
         });
     }
     if (maxBytes > 0) {

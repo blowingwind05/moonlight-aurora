@@ -183,6 +183,7 @@ public:
 
     QByteArray getAuroraWallpaper(const QString& revision);
     void sendAuroraPower(const QString& action, const QSslConfiguration& clientIdentity);
+    QByteArray sendAuroraPrivacy(const QString& action, const QSslConfiguration& clientIdentity);
 
     static
     QVector<NvDisplayMode>
@@ -202,6 +203,9 @@ private:
                    NvLogLevel logLevel,
                    qint64 maxBytes = 0,
                    const QSslConfiguration* pinnedPostIdentity = nullptr);
+
+    QNetworkReply* openAuroraPairedPost(const QString& command, const QString& action,
+                                      const QSslConfiguration& clientIdentity);
 
     NvAddress m_Address;
     QNetworkAccessManager m_Nam;
