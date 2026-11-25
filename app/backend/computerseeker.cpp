@@ -1,10 +1,11 @@
 #include "computerseeker.h"
 #include "computermanager.h"
+#include <QPointer>
 #include <QTimer>
 
-ComputerSeeker::ComputerSeeker(ComputerManager *manager, QString computerName, QObject *parent)
+ComputerSeeker::ComputerSeeker(ComputerManager *manager, QString computerName, QObject *parent, bool loadApps)
     : QObject(parent), m_ComputerManager(manager), m_ComputerName(computerName),
-      m_TimeoutTimer(new QTimer(this))
+      m_TimeoutTimer(new QTimer(this)), m_LoadApps(loadApps)
 {
     // If we know this computer, send a WOL packet to wake it up in case it is asleep.
     for (NvComputer * computer: m_ComputerManager->getComputers()) {
@@ -39,6 +40,11 @@ void ComputerSeeker::onComputerUpdated(NvComputer *computer)
     if (matchComputer(computer) && isOnline(computer)) {
         m_ComputerManager->stopPollingAsync();
         m_TimeoutTimer->stop();
+        if (m_LoadApps) {
+            QPointer<ComputerSeeker> self(this);
+            computer->loadPairedApps();
+            if (!self) return;
+        }
         emit computerFound(computer);
     }
 }

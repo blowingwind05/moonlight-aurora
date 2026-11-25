@@ -457,6 +457,39 @@ NvComputer::ReachabilityType NvComputer::getActiveAddressReachability() const
     }
 }
 
+void NvComputer::loadPairedApps()
+{
+    NvAddress address;
+    uint16_t port;
+    QSslCertificate certificate;
+    {
+        QReadLocker guard(&lock);
+        if (pairState != PS_PAIRED || !appList.isEmpty()) {
+            return;
+        }
+        address = activeAddress;
+        port = activeHttpsPort;
+        certificate = serverCert;
+    }
+    if (address.isNull() || port == 0 || certificate.isNull()) {
+        return;
+    }
+
+    // Discovery stops polling as soon as it identifies the host. On a first
+    // connection the polling worker may not have loaded its apps yet.
+    try {
+        NvHTTP http(address, port, certificate, true);
+        const auto apps = http.getAppList();
+        QWriteLocker guard(&lock);
+        if (serverCert == certificate && appList.isEmpty()) {
+            updateAppList(apps);
+        }
+    }
+    catch (const std::exception&) {
+        qWarning() << "Could not load apps from the paired host";
+    }
+}
+
 bool NvComputer::updateAppList(QVector<NvApp> newAppList) {
     if (appList == newAppList) {
         return false;
