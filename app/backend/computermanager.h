@@ -4,11 +4,14 @@
 #include "settings/streamingpreferences.h"
 #include "settings/compatfetcher.h"
 
+#ifndef AURORA_STREAM_RUNTIME
 #include <qmdnsengine/server.h>
 #include <qmdnsengine/cache.h>
 #include <qmdnsengine/browser.h>
 #include <qmdnsengine/service.h>
 #include <qmdnsengine/resolver.h>
+
+#endif
 
 #include <QThread>
 #include <QReadWriteLock>
@@ -40,6 +43,7 @@ private:
     bool m_FlushSucceeded = true;
 };
 
+#ifndef AURORA_STREAM_RUNTIME
 class MdnsPendingComputer : public QObject
 {
     Q_OBJECT
@@ -137,6 +141,8 @@ private:
     QVector<QHostAddress> m_Addresses;
     int m_Retries = 10;
 };
+
+#endif
 
 class ComputerPollingEntry
 {
@@ -266,7 +272,10 @@ private slots:
 
     void handleComputerStateChanged(NvComputer* computer);
 
+#ifndef AURORA_STREAM_RUNTIME
     void handleMdnsServiceResolved(MdnsPendingComputer* computer, QVector<QHostAddress>& addresses);
+
+#endif
 
 private:
     void saveHosts();
@@ -283,10 +292,13 @@ private:
     QMap<QString, NvComputer*> m_KnownHosts;
     QMap<QString, ComputerPollingEntry*> m_PollEntries;
     QHash<QString, NvComputer> m_LastSerializedHosts; // Protected by m_DelayedFlushMutex
+#ifndef AURORA_STREAM_RUNTIME
     QSharedPointer<QMdnsEngine::Server> m_MdnsServer;
     QMdnsEngine::Browser* m_MdnsBrowser;
     QVector<MdnsPendingComputer*> m_PendingResolution;
     CompatFetcher m_CompatFetcher;
+#endif
+
     DelayedFlushThread* m_DelayedFlushThread;
     QMutex m_DelayedFlushMutex; // Lock ordering: Must never be acquired while holding NvComputer lock
     QWaitCondition m_DelayedFlushCondition;

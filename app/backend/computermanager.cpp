@@ -168,8 +168,10 @@ QSslCertificate ComputerManager::readSavedCertificate(const QString& uuid)
 ComputerManager::ComputerManager(StreamingPreferences* prefs, bool syncHostStorage)
     : m_Prefs(prefs),
       m_PollingRef(0),
+#ifndef AURORA_STREAM_RUNTIME
       m_MdnsBrowser(nullptr),
       m_CompatFetcher(nullptr),
+#endif
       m_NeedsDelayedFlush(false)
 {
     QSettings settings;
@@ -192,8 +194,11 @@ ComputerManager::ComputerManager(StreamingPreferences* prefs, bool syncHostStora
     }
     settings.endArray();
 
+#ifndef AURORA_STREAM_RUNTIME
     // Fetch latest compatibility data asynchronously
     m_CompatFetcher.start();
+
+#endif
 
     // Start the delayed flush thread to handle saveHosts() calls
     m_DelayedFlushThread = new DelayedFlushThread(this, syncHostStorage);
@@ -226,6 +231,7 @@ ComputerManager::~ComputerManager()
 
     QWriteLocker lock(&m_Lock);
 
+#ifndef AURORA_STREAM_RUNTIME
     // Delete machines that haven't been resolved yet
     while (!m_PendingResolution.isEmpty()) {
         MdnsPendingComputer* computer = m_PendingResolution.first();
@@ -236,6 +242,8 @@ ComputerManager::~ComputerManager()
     // Delete the browser to stop discovery
     delete m_MdnsBrowser;
     m_MdnsBrowser = nullptr;
+
+#endif
 
     // Interrupt polling
     for (ComputerPollingEntry* entry : m_PollEntries) {
@@ -377,6 +385,7 @@ void ComputerManager::startPolling()
         return;
     }
 
+#ifndef AURORA_STREAM_RUNTIME
     if (m_Prefs->enableMdns) {
         // Start an MDNS query for GameStream hosts
         m_MdnsServer.reset(new QMdnsEngine::Server());
@@ -394,6 +403,8 @@ void ComputerManager::startPolling()
     else {
         qWarning() << "mDNS is disabled by user preference";
     }
+
+#endif
 
     // Start polling threads for each known host
     QMapIterator<QString, NvComputer*> i(m_KnownHosts);
@@ -428,6 +439,7 @@ void ComputerManager::startPollingComputer(NvComputer* computer)
     }
 }
 
+#ifndef AURORA_STREAM_RUNTIME
 void ComputerManager::handleMdnsServiceResolved(MdnsPendingComputer* computer,
                                                 QVector<QHostAddress>& addresses)
 {
@@ -465,6 +477,8 @@ void ComputerManager::handleMdnsServiceResolved(MdnsPendingComputer* computer,
     m_PendingResolution.removeOne(computer);
     computer->deleteLater();
 }
+
+#endif
 
 void ComputerManager::saveHost(NvComputer *computer)
 {
@@ -734,6 +748,7 @@ void ComputerManager::stopPollingAsync()
         return;
     }
 
+#ifndef AURORA_STREAM_RUNTIME
     // Delete machines that haven't been resolved yet
     while (!m_PendingResolution.isEmpty()) {
         MdnsPendingComputer* computer = m_PendingResolution.first();
@@ -745,6 +760,8 @@ void ComputerManager::stopPollingAsync()
     delete m_MdnsBrowser;
     m_MdnsBrowser = nullptr;
     m_MdnsServer.reset();
+
+#endif
 
     // Interrupt all threads, but don't wait for them to terminate
     for (ComputerPollingEntry* entry : m_PollEntries) {

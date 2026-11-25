@@ -1,12 +1,15 @@
 TEMPLATE = subdirs
 SUBDIRS = \
     moonlight-common-c \
-    qmdnsengine \
     app \
     h264bitstream
 
 # Build the dependencies in parallel before the final app
-app.depends = qmdnsengine moonlight-common-c h264bitstream
+app.depends = moonlight-common-c h264bitstream
+!contains(DEFINES, AURORA_STREAM_RUNTIME) {
+    SUBDIRS += qmdnsengine
+    app.depends += qmdnsengine
+}
 win32:!winrt {
     SUBDIRS += AntiHooking
     app.depends += AntiHooking

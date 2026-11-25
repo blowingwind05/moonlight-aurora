@@ -403,7 +403,7 @@ soundio {
     SOURCES += streaming/audio/renderers/soundioaudiorenderer.cpp
     HEADERS += streaming/audio/renderers/soundioaudiorenderer.h
 }
-discord-rpc {
+discord-rpc:!contains(DEFINES, AURORA_STREAM_RUNTIME) {
     message(Discord integration enabled)
 
     LIBS += -ldiscord-rpc
@@ -487,12 +487,14 @@ else:unix: LIBS += -L$$OUT_PWD/../moonlight-common-c/ -lmoonlight-common-c
 INCLUDEPATH += $$PWD/../moonlight-common-c/moonlight-common-c/src
 DEPENDPATH += $$PWD/../moonlight-common-c/moonlight-common-c/src
 
-win32:CONFIG(release, debug|release): LIBS += -L$$OUT_PWD/../qmdnsengine/release/ -lqmdnsengine
-else:win32:CONFIG(debug, debug|release): LIBS += -L$$OUT_PWD/../qmdnsengine/debug/ -lqmdnsengine
-else:unix: LIBS += -L$$OUT_PWD/../qmdnsengine/ -lqmdnsengine
+!contains(DEFINES, AURORA_STREAM_RUNTIME) {
+    win32:CONFIG(release, debug|release): LIBS += -L$$OUT_PWD/../qmdnsengine/release/ -lqmdnsengine
+    else:win32:CONFIG(debug, debug|release): LIBS += -L$$OUT_PWD/../qmdnsengine/debug/ -lqmdnsengine
+    else:unix: LIBS += -L$$OUT_PWD/../qmdnsengine/ -lqmdnsengine
 
-INCLUDEPATH += $$PWD/../qmdnsengine/qmdnsengine/src/include $$PWD/../qmdnsengine
-DEPENDPATH += $$PWD/../qmdnsengine/qmdnsengine/src/include $$PWD/../qmdnsengine
+    INCLUDEPATH += $$PWD/../qmdnsengine/qmdnsengine/src/include $$PWD/../qmdnsengine
+    DEPENDPATH += $$PWD/../qmdnsengine/qmdnsengine/src/include $$PWD/../qmdnsengine
+}
 
 soundio {
     win32:CONFIG(release, debug|release): LIBS += -L$$OUT_PWD/../soundio/release/ -lsoundio
@@ -569,6 +571,9 @@ macx {
     APP_BUNDLE_RESOURCES.path = Contents/Resources
 
     APP_BUNDLE_FRAMEWORKS.files = $$files(../libs/mac/Frameworks/*.framework, true) $$files(../libs/mac/lib/*.dylib, true)
+    contains(DEFINES, AURORA_STREAM_RUNTIME) {
+        APP_BUNDLE_FRAMEWORKS.files -= $$files(../libs/mac/lib/*discord-rpc*.dylib, true)
+    }
     APP_BUNDLE_FRAMEWORKS.path = Contents/Frameworks
 
     APP_BUNDLE_PLIST.files = $$OUT_PWD/Info.plist
