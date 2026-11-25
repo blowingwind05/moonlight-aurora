@@ -537,6 +537,13 @@ win32 {
     QMAKE_TARGET_DESCRIPTION = Moonlight Game Streaming Client
     QMAKE_TARGET_PRODUCT = Moonlight
 
+    contains(DEFINES, AURORA_STREAM_RUNTIME) {
+        TARGET = AuroraStream
+        QMAKE_TARGET_COMPANY = Aurora Project
+        QMAKE_TARGET_DESCRIPTION = Aurora Stream
+        QMAKE_TARGET_PRODUCT = Aurora
+    }
+
     CONFIG -= embed_manifest_exe
     QMAKE_LFLAGS += /MANIFEST:embed /MANIFESTINPUT:$$shell_quote($$PWD/Moonlight.exe.manifest)
 }
