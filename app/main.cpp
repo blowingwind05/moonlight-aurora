@@ -10,6 +10,7 @@
 #include <QFont>
 #include <QCursor>
 #include <QElapsedTimer>
+#include <QCryptographicHash>
 #include <QTemporaryFile>
 #include <QRegularExpression>
 #include <QTimer>
@@ -63,6 +64,7 @@
 #include "backend/computermanager.h"
 #ifdef AURORA_STREAM_RUNTIME
 #include "backend/aurora-bitrate.h"
+#include "backend/aurora-client-proof.h"
 #endif
 #include "streaming/session.h"
 #include "settings/streamingpreferences.h"
@@ -337,6 +339,47 @@ static int runAuroraBackgroundPair(const PairCommandLineParser& parser)
 }
 
 #ifdef AURORA_STREAM_RUNTIME
+static int runAuroraClientProof(int argc, char** argv)
+{
+    using namespace Aurora::ClientProof;
+    if (argc != 3 || std::strlen(argv[2]) != 2 * ChallengeSize || !NvHTTP::hasAuthenticatedHostFingerprint())
+        return 2;
+
+    const QByteArray encoded(argv[2]);
+    const auto request = QByteArray::fromHex(encoded);
+    if (request.toHex() != encoded ||
+        request.mid(DigestSize, DigestSize).toHex() != qgetenv("AURORA_GAMESTREAM_HOST_CERTIFICATE_SHA256"))
+        return 2;
+
+    Challenge challenge{};
+    std::copy_n(request.constData(), ChallengeSize, challenge.begin());
+    if (std::all_of(challenge.begin(), challenge.begin() + DigestSize, [](unsigned char byte) { return byte == 0; }) ||
+        std::all_of(challenge.end() - DigestSize, challenge.end(), [](unsigned char byte) { return byte == 0; }))
+        return 2;
+
+#ifdef Q_OS_MACOS
+    qputenv("QT_SSL_USE_TEMPORARY_KEYCHAIN", "1");
+#endif
+    QCoreApplication app(argc, argv);
+    auto* identity = IdentityManager::get();
+    const QSslCertificate certificate(identity->getCertificate());
+    const auto der = certificate.toDer();
+    if (der.isEmpty() || der.size() > static_cast<int>(MaxCertificateBytes))
+        return 3;
+
+    CertificateDigest certificateDigest{};
+    const auto digest = QCryptographicHash::hash(der, QCryptographicHash::Sha256);
+    std::copy_n(digest.constData(), DigestSize, certificateDigest.begin());
+    const auto message = transcript(challenge, certificateDigest);
+    const auto signature = identity->signMessage(QByteArray::fromRawData(
+        reinterpret_cast<const char*>(message.data()), static_cast<int>(message.size())));
+    if (signature.isEmpty() || signature.size() > static_cast<int>(MaxSignatureBytes))
+        return 3;
+
+    printf("%s,%s,%s\n", Domain, der.toBase64().constData(), signature.toBase64().constData());
+    return fflush(stdout) == 0 ? 0 : 3;
+}
+
 static int runAuroraPairedCommand(int argc, char** argv)
 {
     const char* command = argv[1];
@@ -546,6 +589,8 @@ int main(int argc, char *argv[])
     }
 
 #ifdef AURORA_STREAM_RUNTIME
+    if (operation == AuroraStreamOperation::ClientProof)
+        return runAuroraClientProof(argc, argv);
     if (operation == AuroraStreamOperation::Power || operation == AuroraStreamOperation::Privacy ||
         operation == AuroraStreamOperation::Bitrate || operation == AuroraStreamOperation::RouteProbe) {
         return runAuroraPairedCommand(argc, argv);

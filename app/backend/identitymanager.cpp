@@ -226,8 +226,30 @@ IdentityManager::getCertificate()
     return m_CachedPemCert;
 }
 
-QByteArray
-IdentityManager::getPrivateKey()
+QByteArray IdentityManager::signMessage(const QByteArray& message) const
 {
-    return m_CachedPrivateKey;
+    // Keep signing in the same process that owns the Moonlight client identity.
+    BIO* bio = BIO_new_mem_buf(const_cast<char*>(m_CachedPrivateKey.constData()), m_CachedPrivateKey.size());
+    if (!bio)
+        return {};
+    EVP_PKEY* key = PEM_read_bio_PrivateKey(bio, nullptr, nullptr, nullptr);
+    BIO_free(bio);
+    if (!key)
+        return {};
+
+    EVP_MD_CTX* context = EVP_MD_CTX_create();
+    size_t length = 0;
+    QByteArray signature;
+    if (context && EVP_DigestSignInit(context, nullptr, EVP_sha256(), nullptr, key) == 1 &&
+        EVP_DigestSignUpdate(context, message.constData(), message.size()) == 1 &&
+        EVP_DigestSignFinal(context, nullptr, &length) == 1 && length > 0 && length <= 16384) {
+        signature.resize(static_cast<int>(length));
+        if (EVP_DigestSignFinal(context, reinterpret_cast<unsigned char*>(signature.data()), &length) == 1)
+            signature.resize(static_cast<int>(length));
+        else
+            signature.clear();
+    }
+    EVP_MD_CTX_destroy(context);
+    EVP_PKEY_free(key);
+    return signature;
 }

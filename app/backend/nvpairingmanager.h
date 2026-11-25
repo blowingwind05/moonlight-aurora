@@ -44,12 +44,8 @@ private:
     bool
     verifySignature(const QByteArray& data, const QByteArray& signature, const QByteArray& serverCertificate);
 
-    QByteArray
-    signMessage(const QByteArray& message);
-
     NvHTTP m_Http;
     bool m_ExactEndpoint;
     QString m_ExpectedHostId;
     X509* m_Cert;
-    EVP_PKEY* m_PrivateKey;
 };

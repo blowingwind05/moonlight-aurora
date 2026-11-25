@@ -14,8 +14,7 @@ public:
     QByteArray
     getCertificate();
 
-    QByteArray
-    getPrivateKey();
+    QByteArray signMessage(const QByteArray& message) const;
 
     QSslConfiguration
     getSslConfig();

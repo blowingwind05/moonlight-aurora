@@ -40,22 +40,11 @@ NvPairingManager::NvPairingManager(NvComputer* computer, const NvAddress& pairAd
         throw std::runtime_error("Unable to load certificate");
     }
 
-    QByteArray pk = IdentityManager::get()->getPrivateKey();
-    bio = BIO_new_mem_buf(pk.data(), -1);
-    THROW_BAD_ALLOC_IF_NULL(bio);
-
-    m_PrivateKey = PEM_read_bio_PrivateKey(bio, nullptr, nullptr, nullptr);
-    BIO_free_all(bio);
-    if (m_PrivateKey == nullptr)
-    {
-        throw std::runtime_error("Unable to load private key");
-    }
 }
 
 NvPairingManager::~NvPairingManager()
 {
     X509_free(m_Cert);
-    EVP_PKEY_free(m_PrivateKey);
 }
 
 QByteArray
@@ -174,26 +163,6 @@ NvPairingManager::verifySignature(const QByteArray& data, const QByteArray& sign
     X509_free(cert);
 
     return result > 0;
-}
-
-QByteArray
-NvPairingManager::signMessage(const QByteArray& message)
-{
-    EVP_MD_CTX *ctx = EVP_MD_CTX_create();
-    THROW_BAD_ALLOC_IF_NULL(ctx);
-
-    EVP_DigestSignInit(ctx, NULL, EVP_sha256(), NULL, m_PrivateKey);
-    EVP_DigestSignUpdate(ctx, reinterpret_cast<unsigned char*>(const_cast<char*>(message.data())), message.length());
-
-    size_t signatureLength = 0;
-    EVP_DigestSignFinal(ctx, NULL, &signatureLength);
-
-    QByteArray signature((int)signatureLength, 0);
-    EVP_DigestSignFinal(ctx, reinterpret_cast<unsigned char*>(signature.data()), &signatureLength);
-
-    EVP_MD_CTX_destroy(ctx);
-
-    return signature;
 }
 
 QByteArray
@@ -359,9 +328,10 @@ NvPairingManager::pair(QString appVersion, QString pin, QSslCertificate& serverC
         return PairState::PIN_WRONG;
     }
 
-    QByteArray clientPairingSecret;
-    clientPairingSecret.append(clientSecretData);
-    clientPairingSecret.append(signMessage(clientSecretData));
+    const auto clientSignature = IdentityManager::get()->signMessage(clientSecretData);
+    if (clientSignature.isEmpty())
+        return PairState::FAILED;
+    const auto clientPairingSecret = clientSecretData + clientSignature;
 
     QString secretRespXml = m_Http.openConnectionToString(m_Http.m_BaseUrlHttp,
                                                           "pair",
