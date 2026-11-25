@@ -89,6 +89,9 @@ void Session::clStageStarting(int stage)
 
 void Session::clStageFailed(int stage, int errorCode)
 {
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    if (QThread::currentThread()->isInterruptionRequested()) return;
+#endif
     // Perform the port test now, while we're on the async connection thread and not blocking the UI.
     unsigned int portFlags = LiGetPortFlagsFromStage(stage);
     s_ActiveSession->m_PortTestResults = LiTestClientConnectivity(CONN_TEST_SERVER, 443, portFlags);
@@ -1153,6 +1156,20 @@ void Session::getWindowDimensions(int& x, int& y,
         displayIndex = SDL_GetWindowDisplayIndex(m_Window);
         SDL_assert(displayIndex >= 0);
     }
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    else if (m_AuroraNativeLaunch) {
+        if (m_AuroraScreenGeometry.isValid()) {
+            for (int i = 0; i < SDL_GetNumVideoDisplays(); i++) {
+                SDL_Rect bounds;
+                if (SDL_GetDisplayBounds(i, &bounds) == 0 &&
+                    bounds.x == m_AuroraScreenGeometry.x() && bounds.y == m_AuroraScreenGeometry.y()) {
+                    displayIndex = i;
+                    break;
+                }
+            }
+        }
+    }
+#endif
     // Create our window on the same display that Qt's UI
     // was being displayed on.
     else {
@@ -1403,9 +1420,13 @@ public:
 // Called in a non-main thread
 bool Session::startConnectionAsync()
 {
-    // Wait 1.5 seconds before connecting to let the user
-    // have time to read any messages present on the segue
-    SDL_Delay(1500);
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    if (!m_AuroraNativeLaunch)
+#endif
+    {
+        // Allow the QML segue to present its startup messages.
+        SDL_Delay(1500);
+    }
 
     // The UI should have ensured the old game was already quit
     // if we decide to stream a different game.
@@ -1455,6 +1476,7 @@ bool Session::startConnectionAsync()
         launchUuid = m_Computer->uuid;
         hasPinnedCertificate = !http.serverCert().isNull();
         routeLock.unlock();
+        if (QThread::currentThread()->isInterruptionRequested()) return false;
 #endif
         http.startApp(m_Computer->currentGameId != 0 ? "resume" : "launch",
                       m_Computer->isNvidiaServerSoftware,
@@ -1468,6 +1490,9 @@ bool Session::startConnectionAsync()
         emit displayLaunchError(tr("Host returned error: %1").arg(e.toQString()));
         return false;
     } catch (const QtNetworkReplyException& e) {
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+        if (QThread::currentThread()->isInterruptionRequested()) return false;
+#endif
         emit displayLaunchError(e.toQString());
         return false;
     }
@@ -1542,6 +1567,9 @@ bool Session::startConnectionAsync()
         }
     }
 
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    if (QThread::currentThread()->isInterruptionRequested()) return false;
+#endif
     int err = LiStartConnection(&hostInfo, &m_StreamConfig, &k_ConnCallbacks,
                                 &m_VideoCallbacks, &m_AudioCallbacks,
                                 NULL, 0, NULL, 0);
@@ -1628,6 +1656,20 @@ void Session::exec(QWindow* qtWindow)
     }
 }
 
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+void Session::execAurora(const QRect& screenGeometry)
+{
+    m_AuroraNativeLaunch = true;
+    m_AuroraScreenGeometry = screenGeometry;
+    exec(nullptr);
+}
+
+void Session::cancelAuroraConnection()
+{
+    m_AuroraConnectionCancelled = true;
+}
+#endif
+
 void Session::execInternal()
 {
     // Complete initialization in this deferred context to avoid
@@ -1655,15 +1697,26 @@ void Session::execInternal()
     AsyncConnectionStartThread asyncConnThread(this);
     if (!m_ThreadedExec) {
         // Kick off the async connection thread while we sit here and pump the event loop
+        QEventLoop::ProcessEventsFlags eventFlags = QEventLoop::ExcludeUserInputEvents;
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+        if (m_AuroraNativeLaunch) eventFlags = QEventLoop::AllEvents;
+#endif
         asyncConnThread.start();
         while (!asyncConnThread.wait(10)) {
-            QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+            QCoreApplication::processEvents(eventFlags);
             QCoreApplication::sendPostedEvents();
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+            if (m_AuroraConnectionCancelled) {
+                asyncConnThread.requestInterruption();
+                // LiStartConnection clears its interrupt flag on entry. Keep signalling
+                // until the worker has stopped, including when cancellation races entry.
+                LiInterruptConnection();
+            }
+#endif
         }
 
-        // Pump the event loop one last time to ensure we pick up any events from
-        // the thread that happened while it was in the final successful QThread::wait().
-        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+        // Deliver final status and any pending cancellation before creating the viewer.
+        QCoreApplication::processEvents(eventFlags);
         QCoreApplication::sendPostedEvents();
     }
     else {
@@ -1673,6 +1726,9 @@ void Session::execInternal()
         asyncConnThread.run();
     }
 
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    if (m_AuroraConnectionCancelled) m_AsyncConnectionSuccess = false;
+#endif
     // If the connection failed, clean up and abort the connection.
     if (!m_AsyncConnectionSuccess) {
         delete m_InputHandler;
@@ -1755,6 +1811,11 @@ void Session::execInternal()
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "SDL_CreateWindow() failed: %s",
                          SDL_GetError());
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+            if (m_AuroraNativeLaunch) {
+                emit displayLaunchError(tr("Aurora couldn’t open the video window."));
+            }
+#endif
 
             delete m_InputHandler;
             m_InputHandler = nullptr;

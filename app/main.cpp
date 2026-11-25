@@ -37,6 +37,9 @@
 #include "cli/listapps.h"
 #include "cli/quitstream.h"
 #include "cli/startstream.h"
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+#include "cli/aurora-mac-stream.h"
+#endif
 #include "cli/pair.h"
 #include "cli/commandlineparser.h"
 #include "path.h"
@@ -854,6 +857,16 @@ int main(int argc, char *argv[])
     app.setDesktopFileName("com.moonlight_stream.Moonlight.desktop");
     qputenv("SDL_VIDEO_WAYLAND_WMCLASS", "com.moonlight_stream.Moonlight");
     qputenv("SDL_VIDEO_X11_WMCLASS", "com.moonlight_stream.Moonlight");
+
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    if (commandLineParserResult == GlobalCommandLineParser::StreamRequested) {
+        auto* preferences = StreamingPreferences::get();
+        StreamCommandLineParser streamParser;
+        streamParser.parse(arguments, preferences);
+        IdentityManager::get();
+        return runAuroraMacStream(app, streamParser.getHost(), streamParser.getAppName(), preferences);
+    }
+#endif
 
     // Register our C++ types for QML
     qmlRegisterType<ComputerModel>("ComputerModel", 1, 0, "ComputerModel");

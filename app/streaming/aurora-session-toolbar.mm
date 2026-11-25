@@ -328,7 +328,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     [_controlMenu addItem:_privacyNote];
     [_privacyNote release];
     [_controlMenu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem* stats = [_controlMenu addItemWithTitle:@"切换统计" action:@selector(sendMenuAction:) keyEquivalent:@""];
+    NSMenuItem* stats = [_controlMenu addItemWithTitle:@"显示／隐藏性能统计" action:@selector(sendMenuAction:) keyEquivalent:@""];
     stats.target = self;
     stats.tag = static_cast<NSInteger>(AuroraToolbarAction::ToggleStats);
     NSMenuItem* release = [_controlMenu addItemWithTitle:@"释放鼠标" action:@selector(sendMenuAction:) keyEquivalent:@"z"];
