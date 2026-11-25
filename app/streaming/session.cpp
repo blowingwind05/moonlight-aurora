@@ -1234,6 +1234,16 @@ void Session::getWindowDimensions(int& x, int& y,
         }
     }
 
+    int videoWidth = m_StreamConfig.width;
+    int videoHeight = m_StreamConfig.height;
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    // The video setup callback has reported the stream size before the viewer is created.
+    if (m_ActiveVideoWidth > 0 && m_ActiveVideoHeight > 0) {
+        videoWidth = m_ActiveVideoWidth;
+        videoHeight = m_ActiveVideoHeight;
+    }
+#endif
+
     SDL_Rect usableBounds;
     if (SDL_GetDisplayUsableBounds(displayIndex, &usableBounds) == 0) {
         // Don't use more than 80% of the display to leave room for system UI
@@ -1241,8 +1251,8 @@ void Session::getWindowDimensions(int& x, int& y,
         // of the image will have a one-pixel black bar next to it).
         SDL_Rect src, dst;
         src.x = src.y = dst.x = dst.y = 0;
-        src.w = m_StreamConfig.width;
-        src.h = m_StreamConfig.height;
+        src.w = videoWidth;
+        src.h = videoHeight;
         dst.w = ((int)SDL_ceilf(usableBounds.w * 0.80f) & ~0x1);
         dst.h = ((int)SDL_ceilf(usableBounds.h * 0.80f) & ~0x1);
 
@@ -1251,9 +1261,9 @@ void Session::getWindowDimensions(int& x, int& y,
 
         // If the stream window can fit within the usable drawing area with 1:1
         // scaling, do that rather than filling the screen.
-        if (m_StreamConfig.width < dst.w && m_StreamConfig.height < dst.h) {
-            width = m_StreamConfig.width;
-            height = m_StreamConfig.height;
+        if (videoWidth < dst.w && videoHeight < dst.h) {
+            width = videoWidth;
+            height = videoHeight;
         }
         else {
             width = dst.w;
@@ -1265,8 +1275,8 @@ void Session::getWindowDimensions(int& x, int& y,
                      "SDL_GetDisplayUsableBounds() failed: %s",
                      SDL_GetError());
 
-        width = m_StreamConfig.width;
-        height = m_StreamConfig.height;
+        width = videoWidth;
+        height = videoHeight;
     }
 
     x = y = SDL_WINDOWPOS_CENTERED_DISPLAY(displayIndex);
@@ -1382,10 +1392,10 @@ void Session::toggleFullscreen()
 
     // Actually enter/leave fullscreen
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
-    if (!fullScreen) hideAuroraSessionToolbar(m_Window);
+    prepareAuroraSessionToolbarForFullscreenChange(m_Window, fullScreen);
     SDL_SetWindowFullscreen(m_Window, fullScreen ? m_FullScreenFlag : 0);
     installAuroraSessionToolbar(m_Window, m_Computer->name, SDL_AtomicGet(&m_AuroraConnectionPoor) != 0,
-                                m_AuroraPrivacy);
+                                m_AuroraPrivacy, m_ActiveVideoWidth, m_ActiveVideoHeight);
 #else
     SDL_SetWindowFullscreen(m_Window, fullScreen ? m_FullScreenFlag : 0);
 #endif
@@ -1898,7 +1908,7 @@ void Session::execInternal()
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
     const bool hasWindowedToolbar = !m_IsFullScreen &&
         installAuroraSessionToolbar(m_Window, m_Computer->name, SDL_AtomicGet(&m_AuroraConnectionPoor) != 0,
-                                    m_AuroraPrivacy);
+                                    m_AuroraPrivacy, m_ActiveVideoWidth, m_ActiveVideoHeight);
 #endif
 
     QSvgRenderer svgIconRenderer(QString(":/res/moonlight.svg"));
@@ -1932,7 +1942,7 @@ void Session::execInternal()
 
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
         installAuroraSessionToolbar(m_Window, m_Computer->name, SDL_AtomicGet(&m_AuroraConnectionPoor) != 0,
-                                    m_AuroraPrivacy);
+                                    m_AuroraPrivacy, m_ActiveVideoWidth, m_ActiveVideoHeight);
 #endif
 
 #ifdef Q_OS_WIN32
@@ -2318,7 +2328,7 @@ void Session::execInternal()
             SDL_AtomicUnlock(&m_DecoderLock);
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
             installAuroraSessionToolbar(m_Window, m_Computer->name,
-                                        SDL_AtomicGet(&m_AuroraConnectionPoor) != 0, m_AuroraPrivacy);
+                                        SDL_AtomicGet(&m_AuroraConnectionPoor) != 0, m_AuroraPrivacy, m_ActiveVideoWidth, m_ActiveVideoHeight);
 #endif
             break;
 

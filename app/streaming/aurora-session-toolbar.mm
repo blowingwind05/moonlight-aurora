@@ -267,6 +267,7 @@ namespace {
     NSMenuItem* _privacyNote;
     NSMenuItem* _exitFullscreen;
     BOOL _nativeFullscreen;
+    NSSize _videoAspect;
 }
 - (instancetype)initWithWindow:(NSWindow*)window deviceName:(NSString*)name;
 - (AuroraToolbarButton*)addButton:(NSString*)title symbol:(NSString*)symbol action:(SEL)action
@@ -276,6 +277,7 @@ namespace {
 - (void)closeConnectionDetails;
 - (void)refreshConnectionDetails:(NSTimer*)timer;
 - (void)showIfWindowed;
+- (void)setVideoWidth:(int)width height:(int)height fullscreen:(BOOL)fullscreen;
 - (void)showFullscreenControls:(BOOL)visible;
 - (void)positionFullscreenControls;
 - (void)updateConnectionQuality:(BOOL)poor;
@@ -468,9 +470,18 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     }
 }
 
+- (void)setVideoWidth:(int)width height:(int)height fullscreen:(BOOL)fullscreen
+{
+    _videoAspect = width > 0 && height > 0 ? NSMakeSize(static_cast<CGFloat>(width) / height, 1) : NSZeroSize;
+    const NSSize aspect = fullscreen || _nativeFullscreen ? NSZeroSize : _videoAspect;
+    // Constrain the video content, leaving titlebar sizing and drag behavior to AppKit.
+    if (!NSEqualSizes(_window.contentAspectRatio, aspect)) _window.contentAspectRatio = aspect;
+}
+
 - (void)windowWillEnterFullscreen:(NSNotification*)notification
 {
     _nativeFullscreen = YES;
+    _window.contentAspectRatio = NSZeroSize;
     _window.toolbar.visible = NO;
 }
 
@@ -482,6 +493,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 - (void)windowDidExitFullscreen:(NSNotification*)notification
 {
     _nativeFullscreen = NO;
+    _window.contentAspectRatio = _videoAspect;
     [self showFullscreenControls:NO];
     [self showIfWindowed];
 }
@@ -720,7 +732,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 @end
 
 bool installAuroraSessionToolbar(SDL_Window* window, const QString& deviceName, bool connectionPoor,
-                                 const std::shared_ptr<AuroraSessionPrivacy>& privacy)
+                                 const std::shared_ptr<AuroraSessionPrivacy>& privacy, int videoWidth, int videoHeight)
 {
     if (![NSThread isMainThread] || !window) return false;
     NSWindow* native = nativeWindow(window);
@@ -745,6 +757,7 @@ bool installAuroraSessionToolbar(SDL_Window* window, const QString& deviceName, 
         [controller updatePrivacyMenu];
     }
 
+    [controller setVideoWidth:videoWidth height:videoHeight fullscreen:fullscreen];
     [controller showFullscreenControls:fullscreen];
     if (fullscreen) return false;
     if (native.toolbar.delegate == controller) {
@@ -785,12 +798,13 @@ bool installAuroraSessionToolbar(SDL_Window* window, const QString& deviceName, 
     return true;
 }
 
-void hideAuroraSessionToolbar(SDL_Window* window)
+void prepareAuroraSessionToolbarForFullscreenChange(SDL_Window* window, bool enteringFullscreen)
 {
     NSWindow* native = nativeWindow(window);
-    if (auroraToolbar(native) && native.toolbar.visible) {
-        native.toolbar.visible = NO;
-    }
+    if (!auroraToolbar(native)) return;
+
+    native.contentAspectRatio = NSZeroSize;
+    if (!enteringFullscreen && native.toolbar.visible) native.toolbar.visible = NO;
 }
 
 void closeAuroraFullscreenControls(SDL_Window* window)
