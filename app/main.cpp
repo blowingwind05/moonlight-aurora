@@ -368,10 +368,13 @@ static int runAuroraBackgroundPair(const PairCommandLineParser& parser)
 }
 
 #ifdef AURORA_STREAM_RUNTIME
-static int runAuroraPower(int argc, char** argv)
+static int runAuroraPairedCommand(int argc, char** argv)
 {
+    const char* command = argv[1];
+    const bool privacy = std::strcmp(command, "privacy") == 0;
     if (argc != 5) {
-        fputs("Usage: AuroraStream --aurora-runtime power <ip:port> <host-uuid> <restart|shutdown>\n", stderr);
+        fprintf(stderr, "Usage: AuroraStream --aurora-runtime %s <ip:port> <host-uuid> <%s>\n",
+            command, privacy ? "status|on|off" : "restart|shutdown");
         return 2;
     }
 #ifdef Q_OS_MACOS
@@ -388,9 +391,11 @@ static int runAuroraPower(int argc, char** argv)
     const auto uuidPattern = QRegularExpression(QStringLiteral(
         R"(\A[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\z)"));
     const int httpsPort = port + DEFAULT_HTTPS_PORT - DEFAULT_HTTP_PORT;
+    const bool validAction = privacy ? (action == "status" || action == "on" || action == "off") :
+        (action == "restart" || action == "shutdown");
     if (address.isNull() || port > 65535 || httpsPort <= 0 ||
-            !uuidPattern.match(uuid).hasMatch() || (action != "restart" && action != "shutdown")) {
-        fputs("Invalid Aurora power endpoint, host UUID, or action.\n", stderr);
+            !uuidPattern.match(uuid).hasMatch() || !validAction) {
+        fprintf(stderr, "Invalid Aurora %s endpoint, host UUID, or action.\n", command);
         return 2;
     }
     const NvAddress target(address, static_cast<uint16_t>(port));
@@ -398,7 +403,7 @@ static int runAuroraPower(int argc, char** argv)
     const auto relayUuid = qEnvironmentVariable("AURORA_GAMESTREAM_HOST_UUID");
     if ((!relay.isNull() && (!(relay == target) || uuid.compare(relayUuid, Qt::CaseInsensitive) != 0)) ||
             (relay.isNull() && !relayUuid.isEmpty())) {
-        fputs("Aurora power target does not match its GameStream relay.\n", stderr);
+        fprintf(stderr, "Aurora %s target does not match its GameStream relay.\n", command);
         return 2;
     }
 
@@ -414,16 +419,21 @@ static int runAuroraPower(int argc, char** argv)
     }
     try {
         NvHTTP http(target, static_cast<uint16_t>(httpsPort), certificate, true);
-        http.sendAuroraPower(action, clientIdentity);
-        puts("accepted");
+        if (privacy) {
+            const auto state = http.sendAuroraPrivacy(action, clientIdentity);
+            puts(state.constData());
+        } else {
+            http.sendAuroraPower(action, clientIdentity);
+            puts("accepted");
+        }
         return 0;
     }
     catch (const GfeHttpResponseException& error) {
-        fputs(error.getStatusCode() == 401 ? "Aurora power host certificate did not match.\n" :
-              "Aurora power request was not accepted by the host.\n", stderr);
+        fprintf(stderr, error.getStatusCode() == 401 ? "Aurora %s host certificate did not match.\n" :
+            "Aurora %s request was not accepted by the host.\n", command);
     }
     catch (const QtNetworkReplyException&) {
-        fputs("Aurora power request failed or the host is unavailable.\n", stderr);
+        fprintf(stderr, "Aurora %s request failed or the host is unavailable.\n", command);
     }
     return 4;
 }
@@ -521,8 +531,8 @@ int main(int argc, char *argv[])
     }
 
 #ifdef AURORA_STREAM_RUNTIME
-    if (argc > 1 && std::strcmp(argv[1], "power") == 0) {
-        return runAuroraPower(argc, argv);
+    if (argc > 1 && (std::strcmp(argv[1], "power") == 0 || std::strcmp(argv[1], "privacy") == 0)) {
+        return runAuroraPairedCommand(argc, argv);
     }
     if (argc > 1 && std::strcmp(argv[1], "wallpaper") == 0) {
         return runAuroraWallpaper(argc, argv);
