@@ -435,7 +435,9 @@ static int runAuroraPairedCommand(int argc, char** argv)
     }
 
     const auto certificate = ComputerManager::readSavedCertificate(uuid);
-    if (certificate.isNull() && !probe) {
+    const bool verifyControlHost = certificate.isNull() && (privacy || bitrate) &&
+        NvHTTP::hasAuthenticatedHostFingerprint();
+    if (certificate.isNull() && !probe && !verifyControlHost) {
         fputs("Aurora has no saved pairing certificate for this host.\n", stderr);
         return 3;
     }
@@ -446,6 +448,16 @@ static int runAuroraPairedCommand(int argc, char** argv)
     }
     try {
         NvHTTP http(target, static_cast<uint16_t>(httpsPort), certificate, true);
+        const auto verifyPairedHost = [&http, &uuid] {
+            const auto info = http.getServerInfo(NvHTTP::NVLL_NONE, true);
+            return http.hasPinnedServerInfo() &&
+                NvHTTP::getXmlString(info, "uniqueid").compare(uuid, Qt::CaseInsensitive) == 0 &&
+                NvHTTP::getXmlString(info, "PairStatus") == "1";
+        };
+        if (verifyControlHost && !verifyPairedHost()) {
+            fputs("Aurora could not confirm the paired control endpoint.\n", stderr);
+            return 4;
+        }
         if (probe) {
             std::array<qint64, 3> measured{};
             int successful = 0;
@@ -454,10 +466,7 @@ static int runAuroraPairedCommand(int argc, char** argv)
                 QElapsedTimer timer;
                 timer.start();
                 try {
-                    const auto info = http.getServerInfo(NvHTTP::NVLL_NONE, true);
-                    if (!http.hasPinnedServerInfo() ||
-                        NvHTTP::getXmlString(info, "uniqueid").compare(uuid, Qt::CaseInsensitive) != 0 ||
-                        NvHTTP::getXmlString(info, "PairStatus") != "1") {
+                    if (!verifyPairedHost()) {
                         return 4;
                     }
                     measured[successful++] = timer.elapsed();
