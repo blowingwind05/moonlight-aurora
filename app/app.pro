@@ -1,4 +1,9 @@
 QT += core quick network quickcontrols2 svg
+
+win32:contains(DEFINES, AURORA_STREAM_RUNTIME) {
+    HEADERS += qt-session/AuroraConnectionView.h qt-session/AuroraEmbeddedConnectionView.h
+    RESOURCES += qt-session/connection-stage.qrc
+}
 CONFIG += c++11
 
 unix:!macx {

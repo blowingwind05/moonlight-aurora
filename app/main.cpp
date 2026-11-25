@@ -53,6 +53,9 @@
 #include "streaming/auroraembedded.h"
 
 #if defined(Q_OS_WIN32) && defined(AURORA_STREAM_RUNTIME)
+#include "qt-session/AuroraEmbeddedConnectionView.h"
+#include <cstdio>
+
 static void startAuroraEmbeddedStream(QGuiApplication& app, CliStartStream::Launcher* launcher,
                                       StreamingPreferences* preferences)
 {
@@ -94,6 +97,20 @@ static void startAuroraEmbeddedStream(QGuiApplication& app, CliStartStream::Laun
 
     QTimer::singleShot(0, launcher, [launcher, manager, stopTimer]() {
         stopTimer->start(80);
+        auto& embedded = AuroraEmbeddedSession::current();
+        if (qEnvironmentVariableIntValue("AURORA_QT_SESSION") == 1) {
+            if (auto host = embedded.hostWindow()) {
+                auto stage = new AuroraEmbeddedConnectionView(host, launcher);
+                if (auto view = stage->show()) {
+                    embedded.setConnectionView(view);
+                    std::fputs("aurora-connection-stage/1,qt\n", stdout);
+                    std::fflush(stdout);
+                } else {
+                    delete stage;
+                    qWarning("Aurora could not attach the Qt connection view. Using the host connection view.");
+                }
+            }
+        }
         launcher->execute(manager);
     });
 }

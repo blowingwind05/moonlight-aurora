@@ -7,6 +7,8 @@
 #include <SDL_syswm.h>
 #include <QByteArray>
 #include <QString>
+#include <QPointer>
+#include <QWindow>
 
 class AuroraEmbeddedSession
 {
@@ -46,6 +48,8 @@ public:
 
     bool enabled() const { return m_Parent != nullptr; }
     bool attachmentFailed() const { return m_AttachmentFailed; }
+    HWND hostWindow() const { return hasHost() ? m_Parent : nullptr; }
+    void setConnectionView(QWindow* view) { m_ConnectionView = view; }
 
     bool stopRequested() const
     {
@@ -120,6 +124,7 @@ public:
     void show(SDL_Window* window)
     {
         ShowWindow(m_Window, SW_SHOWNOACTIVATE);
+        if (m_ConnectionView) m_ConnectionView->hide();
 
         // A foreign SDL window may already be marked shown. Queue the initial
         // decoder setup explicitly even when Windows doesn't send a show event.
@@ -190,6 +195,7 @@ private:
     QString m_Name;
     HWND m_Parent = nullptr;
     HWND m_Window = nullptr;
+    QPointer<QWindow> m_ConnectionView;
     DWORD m_ParentPid = 0;
     WNDPROC m_SdlProc = nullptr;
     HANDLE m_Ready = nullptr;
