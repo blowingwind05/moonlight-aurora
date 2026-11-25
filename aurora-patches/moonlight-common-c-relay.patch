@@ -1,0 +1,70 @@
+diff --git a/moonlight-common-c/moonlight-common-c/src/Connection.c b/moonlight-common-c/moonlight-common-c/src/Connection.c
+--- a/moonlight-common-c/moonlight-common-c/src/Connection.c
++++ b/moonlight-common-c/moonlight-common-c/src/Connection.c
+@@ -269,7 +269,13 @@
+     AudioPortNumber = 0;
+ 
+     // Parse RTSP port number from RTSP session URL
+-    if (!parseRtspPortNumberFromUrl(serverInfo->rtspSessionUrl, &RtspPortNumber)) {
++    if (serverInfo->auroraRelayBasePort != 0) {
++        // Keep sessionUrl0 intact for RTSP requests and encryption negotiation.
++        // Use the local relay port only for the actual TCP connection.
++        RtspPortNumber = serverInfo->auroraRelayBasePort + 21;
++        Limelog("Aurora relay RTSP port: %u\n", RtspPortNumber);
++    }
++    else if (!parseRtspPortNumberFromUrl(serverInfo->rtspSessionUrl, &RtspPortNumber)) {
+         // Use the well known port if parsing fails
+         RtspPortNumber = 48010;
+ 
+diff --git a/moonlight-common-c/moonlight-common-c/src/Limelight.h b/moonlight-common-c/moonlight-common-c/src/Limelight.h
+--- a/moonlight-common-c/moonlight-common-c/src/Limelight.h
++++ b/moonlight-common-c/moonlight-common-c/src/Limelight.h
+@@ -512,6 +512,9 @@
+ 
+     // Specifies the 'ServerCodecModeSupport' from the /serverinfo response.
+     int serverCodecModeSupport;
++
++    // Local Aurora relay HTTP base, or zero for direct GameStream connections.
++    unsigned short auroraRelayBasePort;
+ } SERVER_INFORMATION, *PSERVER_INFORMATION;
+ 
+ // Use this function to zero the server information when allocated on the stack or heap
+diff --git a/moonlight-common-c/moonlight-common-c/src/RtspConnection.c b/moonlight-common-c/moonlight-common-c/src/RtspConnection.c
+--- a/moonlight-common-c/moonlight-common-c/src/RtspConnection.c
++++ b/moonlight-common-c/moonlight-common-c/src/RtspConnection.c
+@@ -1144,7 +1144,10 @@
+ 
+         // Parse the audio port out of the RTSP SETUP response
+         LC_ASSERT(AudioPortNumber == 0);
+-        if (!parseServerPortFromTransport(&response, &AudioPortNumber)) {
++        if (serverInfo->auroraRelayBasePort != 0) {
++            AudioPortNumber = serverInfo->auroraRelayBasePort + 11;
++        }
++        else if (!parseServerPortFromTransport(&response, &AudioPortNumber)) {
+             // Use the well known port if parsing fails
+             AudioPortNumber = 48000;
+ 
+@@ -1220,7 +1223,10 @@
+ 
+         // Parse the video port out of the RTSP SETUP response
+         LC_ASSERT(VideoPortNumber == 0);
+-        if (!parseServerPortFromTransport(&response, &VideoPortNumber)) {
++        if (serverInfo->auroraRelayBasePort != 0) {
++            VideoPortNumber = serverInfo->auroraRelayBasePort + 9;
++        }
++        else if (!parseServerPortFromTransport(&response, &VideoPortNumber)) {
+             // Use the well known port if parsing fails
+             VideoPortNumber = 47998;
+ 
+@@ -1264,7 +1270,10 @@
+ 
+         // Parse the control port out of the RTSP SETUP response
+         LC_ASSERT(ControlPortNumber == 0);
+-        if (!parseServerPortFromTransport(&response, &ControlPortNumber)) {
++        if (serverInfo->auroraRelayBasePort != 0) {
++            ControlPortNumber = serverInfo->auroraRelayBasePort + 10;
++        }
++        else if (!parseServerPortFromTransport(&response, &ControlPortNumber)) {
+             // Use the well known port if parsing fails
+             ControlPortNumber = 47999;
+ 
