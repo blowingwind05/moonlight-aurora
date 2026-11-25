@@ -5,6 +5,7 @@
 #include "../AuroraStreamSessionProtocol.h"
 #include "cli/startstream.h"
 #include "backend/computermanager.h"
+#include "backend/nvhttp.h"
 #include "qt-session/AuroraEmbeddedConnectionView.h"
 #include "settings/streamingpreferences.h"
 #include "streaming/aurora-connection-details.h"
@@ -92,6 +93,10 @@ bool startAuroraWindowsStream(QGuiApplication& app, const QString& host, const Q
 {
     if (!AuroraEmbeddedSession::current().enabled()) {
         return false;
+    }
+    if (NvHTTP::hasAuthenticatedHostFingerprint()) {
+        std::puts(Aurora::StreamSession::PinnedControlAvailable);
+        std::fflush(stdout);
     }
     preferences->windowMode = StreamingPreferences::WM_WINDOWED;
     preferences->captureSysKeysMode = StreamingPreferences::CSK_OFF;
