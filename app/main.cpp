@@ -16,6 +16,7 @@
 
 #ifdef AURORA_STREAM_RUNTIME
 #include "AuroraStreamEntry.h"
+#include "streaming/aurora-connection-details.h"
 #endif
 
 // Don't let SDL hook our main function, since Qt is already
@@ -978,6 +979,9 @@ int main(int argc, char *argv[])
             if (AuroraEmbeddedSession::current().enabled()) {
                 preferences->windowMode = StreamingPreferences::WM_WINDOWED;
                 preferences->captureSysKeysMode = StreamingPreferences::CSK_OFF;
+                if (qEnvironmentVariableIsSet("AURORA_CONNECTION_DETAILS")) {
+                    AuroraConnectionMonitor::instance().enableParentReporting();
+                }
                 startAuroraEmbeddedStream(app, launcher, preferences);
                 hasGUI = false;
                 break;
