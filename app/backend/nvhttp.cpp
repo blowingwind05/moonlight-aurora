@@ -1,4 +1,7 @@
 #include "nvcomputer.h"
+#ifdef AURORA_STREAM_RUNTIME
+#include "../AuroraStreamEntry.h"
+#endif
 #include <Limelight.h>
 
 #include <QDebug>
@@ -20,7 +23,7 @@
 
 NvHTTP::NvHTTP(NvAddress address, uint16_t httpsPort, QSslCertificate serverCert, bool exactEndpoint) :
     m_ServerCert(serverCert),
-    m_ExactEndpoint(exactEndpoint)
+    m_ExactEndpoint(exactEndpoint || gameStreamRelayBase(address) != 0)
 {
     m_BaseUrlHttp.setScheme("http");
     m_BaseUrlHttps.setScheme("https");
@@ -58,9 +61,27 @@ void NvHTTP::setAddress(NvAddress address)
     m_BaseUrlHttp.setPort(address.port());
 }
 
+NvAddress NvHTTP::gameStreamRelayAddress()
+{
+#ifdef AURORA_STREAM_RUNTIME
+    const int base = auroraGameStreamRelayBase();
+    if (base > 0) {
+        return NvAddress(QStringLiteral("127.0.0.1"), static_cast<uint16_t>(base));
+    }
+#endif
+    return NvAddress();
+}
+
+uint16_t NvHTTP::gameStreamRelayBase(const NvAddress& address)
+{
+    const auto relayAddress = gameStreamRelayAddress();
+    return !relayAddress.isNull() && address == relayAddress ? relayAddress.port() : 0;
+}
+
 void NvHTTP::setHttpsPort(uint16_t port)
 {
-    m_BaseUrlHttps.setPort(port);
+    const auto relayBase = gameStreamRelayBase(m_Address);
+    m_BaseUrlHttps.setPort(relayBase != 0 ? relayBase - 5 : port);
 }
 
 NvAddress NvHTTP::address()
@@ -184,6 +205,10 @@ NvHTTP::getServerInfo(NvLogLevel logLevel, bool fastFail)
         }
     }
 
+    if (gameStreamRelayBase(m_Address) != 0 &&
+        getXmlString(serverInfo, "uniqueid") != qEnvironmentVariable("AURORA_GAMESTREAM_HOST_UUID")) {
+        throw GfeHttpResponseException(409, QStringLiteral("GameStream relay reached an unexpected host UUID"));
+    }
     return serverInfo;
 }
 
