@@ -1,6 +1,7 @@
 #include "nvcomputer.h"
 #ifdef AURORA_STREAM_RUNTIME
 #include "../AuroraStreamEntry.h"
+#include "aurora-bitrate.h"
 #endif
 #include <Limelight.h>
 
@@ -473,6 +474,32 @@ QByteArray NvHTTP::sendAuroraPrivacy(const QString& action, const QSslConfigurat
     return response;
 }
 
+#ifdef AURORA_STREAM_RUNTIME
+QByteArray NvHTTP::sendAuroraBitrate(const AuroraBitrate::Request& request,
+                                    const QSslConfiguration& clientIdentity)
+{
+    if (!m_ExactEndpoint || m_ServerCert.isNull() || m_BaseUrlHttps.scheme() != "https") {
+        throw GfeHttpResponseException(400, "Invalid Aurora paired endpoint");
+    }
+
+    bool notFound = false;
+    QScopedPointer<QNetworkReply> reply(openConnection(m_BaseUrlHttps, "aurora-video-bitrate-v2",
+        QString::fromLatin1(AuroraBitrate::query(request)), REQUEST_TIMEOUT_MS, NVLL_NONE,
+        AuroraBitrate::MaxReplyBytes, &clientIdentity, &notFound));
+    if (notFound) {
+        return QByteArrayLiteral("unsupported");
+    }
+    if (reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 200) {
+        throw GfeHttpResponseException(400, "Invalid Aurora bitrate response status");
+    }
+    const auto line = AuroraBitrate::validatedLine(request, reply->read(AuroraBitrate::MaxReplyBytes + 1));
+    if (line.isEmpty()) {
+        throw GfeHttpResponseException(400, "Invalid Aurora bitrate response");
+    }
+    return line;
+}
+#endif
+
 QByteArray
 NvHTTP::getXmlStringFromHex(QString xml,
                             QString tagName)
@@ -566,7 +593,8 @@ NvHTTP::openConnection(QUrl baseUrl,
                        int timeoutMs,
                        NvLogLevel logLevel,
                        qint64 maxBytes,
-                       const QSslConfiguration* pinnedPostIdentity)
+                       const QSslConfiguration* pinnedPostIdentity,
+                       bool* pairedNotFound)
 {
     // Port must be set
     Q_ASSERT(baseUrl.port(0) != 0);
@@ -647,6 +675,18 @@ NvHTTP::openConnection(QUrl baseUrl,
 
     // Run the request with a timeout if requested
     QEventLoop loop;
+    if (pairedNotFound && pinnedPostIdentity && m_ExactEndpoint && url.scheme() == "https") {
+        // Old paired hosts may return an HTML 404. Authenticate the headers and
+        // stop reading the body so it cannot exceed the control response limit.
+        connect(reply, &QNetworkReply::metaDataChanged, &loop, [this, reply, pairedNotFound]() {
+            if (!*pairedNotFound && reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 404 &&
+                    !reply->attribute(QNetworkRequest::RedirectionTargetAttribute).isValid() &&
+                    reply->sslConfiguration().peerCertificate() == m_ServerCert) {
+                *pairedNotFound = true;
+                reply->abort();
+            }
+        });
+    }
     connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
     connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, &loop, &QEventLoop::quit);
     if (timeoutMs) {
@@ -669,6 +709,10 @@ NvHTTP::openConnection(QUrl baseUrl,
     // We must clear out cached authentication and connections or
     // GFE will puke next time
     m_Nam.clearAccessCache();
+
+    if (pairedNotFound && *pairedNotFound) {
+        return reply;
+    }
 
     // Handle error
     if (reply->error() != QNetworkReply::NoError)

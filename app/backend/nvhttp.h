@@ -98,6 +98,10 @@ private:
     QString m_ErrorText;
 };
 
+#ifdef AURORA_STREAM_RUNTIME
+namespace AuroraBitrate { struct Request; }
+#endif
+
 class NvHTTP : public QObject
 {
     Q_OBJECT
@@ -188,6 +192,9 @@ public:
     QByteArray getAuroraWallpaper(const QString& revision);
     void sendAuroraPower(const QString& action, const QSslConfiguration& clientIdentity);
     QByteArray sendAuroraPrivacy(const QString& action, const QSslConfiguration& clientIdentity);
+#ifdef AURORA_STREAM_RUNTIME
+    QByteArray sendAuroraBitrate(const AuroraBitrate::Request& request, const QSslConfiguration& clientIdentity);
+#endif
 
     static
     QVector<NvDisplayMode>
@@ -206,7 +213,8 @@ private:
                    int timeoutMs,
                    NvLogLevel logLevel,
                    qint64 maxBytes = 0,
-                   const QSslConfiguration* pinnedPostIdentity = nullptr);
+                   const QSslConfiguration* pinnedPostIdentity = nullptr,
+                   bool* pairedNotFound = nullptr);
 
     QNetworkReply* openAuroraPairedPost(const QString& command, const QString& action,
                                       const QSslConfiguration& clientIdentity);

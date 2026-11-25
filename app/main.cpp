@@ -46,6 +46,9 @@
 #include "gui/appmodel.h"
 #include "backend/autoupdatechecker.h"
 #include "backend/computermanager.h"
+#ifdef AURORA_STREAM_RUNTIME
+#include "backend/aurora-bitrate.h"
+#endif
 #include "backend/systemproperties.h"
 #include "streaming/session.h"
 #include "settings/streamingpreferences.h"
@@ -390,7 +393,15 @@ static int runAuroraPairedCommand(int argc, char** argv)
 {
     const char* command = argv[1];
     const bool privacy = std::strcmp(command, "privacy") == 0;
-    if (argc != 5) {
+    const bool bitrate = std::strcmp(command, "bitrate") == 0;
+    AuroraBitrate::Request bitrateRequest;
+    const int expectedArgumentCount = argc;
+    if (bitrate && !AuroraBitrate::parseRequest(argc, argv, bitrateRequest)) {
+        fputs("Usage: AuroraStream --aurora-runtime bitrate <ip:port> <host-uuid> status|set <session> <kbps> <revision>\n",
+              stderr);
+        return 2;
+    }
+    if (!bitrate && argc != 5) {
         fprintf(stderr, "Usage: AuroraStream --aurora-runtime %s <ip:port> <host-uuid> <%s>\n",
             command, privacy ? "status|on|off" : "restart|shutdown");
         return 2;
@@ -400,6 +411,9 @@ static int runAuroraPairedCommand(int argc, char** argv)
 #endif
     QCoreApplication app(argc, argv);
     const auto args = app.arguments();
+    if (bitrate && args.size() != expectedArgumentCount) {
+        return 2;
+    }
     const auto action = args[4];
     const auto endpoint = QRegularExpression(QStringLiteral(
         R"(\A(?:\[([0-9A-Fa-f:.]+)\]|([0-9]{1,3}(?:\.[0-9]{1,3}){3})):([0-9]{1,5})\z)")).match(args[2]);
@@ -409,8 +423,8 @@ static int runAuroraPairedCommand(int argc, char** argv)
     const auto uuidPattern = QRegularExpression(QStringLiteral(
         R"(\A[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\z)"));
     const int httpsPort = port + DEFAULT_HTTPS_PORT - DEFAULT_HTTP_PORT;
-    const bool validAction = privacy ? (action == "status" || action == "on" || action == "off") :
-        (action == "restart" || action == "shutdown");
+    const bool validAction = bitrate || (privacy ? (action == "status" || action == "on" || action == "off") :
+        (action == "restart" || action == "shutdown"));
     if (address.isNull() || port > 65535 || httpsPort <= 0 ||
             !uuidPattern.match(uuid).hasMatch() || !validAction) {
         fprintf(stderr, "Invalid Aurora %s endpoint, host UUID, or action.\n", command);
@@ -437,7 +451,10 @@ static int runAuroraPairedCommand(int argc, char** argv)
     }
     try {
         NvHTTP http(target, static_cast<uint16_t>(httpsPort), certificate, true);
-        if (privacy) {
+        if (bitrate) {
+            const auto result = http.sendAuroraBitrate(bitrateRequest, clientIdentity);
+            puts(result.constData());
+        } else if (privacy) {
             const auto state = http.sendAuroraPrivacy(action, clientIdentity);
             puts(state.constData());
         } else {
@@ -549,7 +566,8 @@ int main(int argc, char *argv[])
     }
 
 #ifdef AURORA_STREAM_RUNTIME
-    if (argc > 1 && (std::strcmp(argv[1], "power") == 0 || std::strcmp(argv[1], "privacy") == 0)) {
+    if (argc > 1 && (std::strcmp(argv[1], "power") == 0 || std::strcmp(argv[1], "privacy") == 0 ||
+                     std::strcmp(argv[1], "bitrate") == 0)) {
         return runAuroraPairedCommand(argc, argv);
     }
     if (argc > 1 && std::strcmp(argv[1], "wallpaper") == 0) {
