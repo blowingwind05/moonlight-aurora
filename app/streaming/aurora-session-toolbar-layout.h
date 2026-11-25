@@ -5,28 +5,31 @@
 struct AuroraSessionToolbarLayout {
     int device;
     int status;
-    int fullscreen;
+    int display;
     int controls;
     int disconnect;
     bool brand;
 
-    int actionsWidth() const {
-        return fullscreen + controls + disconnect + 8 + (brand ? 28 : 0);
-    }
+    int contextWidth() const { return device + status + display + 14; }
+    int actionsWidth() const { return controls + disconnect + 4 + (brand ? 36 : 0); }
 };
 
 inline AuroraSessionToolbarLayout auroraSessionToolbarLayout(
         int width, int trafficRight, int nameWidth, bool brandAvailable)
 {
+    const bool compact = width < 760;
     AuroraSessionToolbarLayout layout{
-        0, width < 490 ? 25 : 94,
-        width < 760 ? 32 : 80, width < 760 ? 32 : 94,
-        width < 490 ? 32 : 58, brandAvailable};
-    // Leave room for AppKit's toolbar margins and the flexible gap between groups.
-    const int available = width - std::max(78, trafficRight) - 40 - layout.status - 8;
-    if (layout.brand && available - layout.actionsWidth() < 64) {
+        0, width < 490 ? 25 : 94, compact ? 32 : 152,
+        compact ? 32 : 94, width < 490 ? 32 : 58, brandAvailable};
+
+    // Leave breathing room for the native traffic lights and toolbar margins.
+    const int content = width - std::max(78, trafficRight) - 40;
+    if (layout.brand && content - layout.contextWidth() - layout.actionsWidth() < 48) {
         layout.brand = false;
     }
-    layout.device = std::max(36, std::min({nameWidth, 240, available - layout.actionsWidth()}));
+    if (content - layout.contextWidth() - layout.actionsWidth() < 40) {
+        layout.display = 32;
+    }
+    layout.device = std::max(36, std::min({nameWidth, 240, content - layout.contextWidth() - layout.actionsWidth()}));
     return layout;
 }

@@ -21,3 +21,11 @@ bool installAuroraSessionToolbar(SDL_Window* window, const QString& deviceName, 
 void prepareAuroraSessionToolbarForFullscreenChange(SDL_Window* window, bool enteringFullscreen);
 void closeAuroraFullscreenControls(SDL_Window* window);
 void setAuroraSessionToolbarConnectionQuality(SDL_Window* window, bool poor);
+
+#ifdef __OBJC__
+  #import <objc/objc.h>
+@class NSWindow;
+@class NSString;
+void installAuroraConnectionToolbar(NSWindow* window, NSString* deviceName, id cancelTarget, SEL cancelAction);
+void setAuroraConnectionToolbarFailed(NSWindow* window, bool failed);
+#endif

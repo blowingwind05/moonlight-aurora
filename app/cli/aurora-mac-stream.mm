@@ -1,10 +1,14 @@
 #include "aurora-mac-stream.h"
 #include "startstream.h"
 #include "backend/computermanager.h"
+#include "streaming/aurora-session-toolbar.h"
 #include "streaming/session.h"
 
 #import <AppKit/AppKit.h>
+#import <QuartzCore/QuartzCore.h>
 
+#include <algorithm>
+#include <cmath>
 #include <QDebug>
 #include <QGuiApplication>
 #include <QScreen>
@@ -13,153 +17,214 @@
 #include <functional>
 
 namespace {
+constexpr int RetryConnection = 75;
+constexpr CGFloat ProgressSize = 26;
+
 NSString* nativeText(const QString& text)
 {
     return [NSString stringWithUTF8String:text.toUtf8().constData()];
 }
+
+NSColor* rgb(unsigned color)
+{
+    return [NSColor colorWithSRGBRed:((color >> 16) & 255) / 255.0
+                               green:((color >> 8) & 255) / 255.0 blue:(color & 255) / 255.0 alpha:1];
 }
+}
+
+@interface AuroraConnectSpinner : NSView {
+    CAShapeLayer* _arc;
+}
+- (void)setRunning:(BOOL)running;
+@end
+
+@implementation AuroraConnectSpinner
+- (instancetype)init
+{
+    self = [super initWithFrame:NSMakeRect(0, 0, ProgressSize, ProgressSize)];
+    if (self) {
+        self.wantsLayer = YES;
+        auto* track = [CAShapeLayer layer];
+        _arc = [CAShapeLayer layer];
+        const auto circle = CGPathCreateWithEllipseInRect(CGRectInset(NSRectToCGRect(self.bounds), 1, 1), nullptr);
+        for (CAShapeLayer* part in @[track, _arc]) {
+            part.frame = self.bounds;
+            part.fillColor = NSColor.clearColor.CGColor;
+            part.lineWidth = 2;
+            part.path = circle;
+            [self.layer addSublayer:part];
+        }
+        CGPathRelease(circle);
+        track.strokeColor = rgb(0xd4e0f2).CGColor;
+        _arc.strokeColor = rgb(0x087cf5).CGColor;
+        _arc.strokeEnd = .26;
+        _arc.lineCap = kCALineCapRound;
+        [self setAccessibilityElement:NO];
+    }
+    return self;
+}
+
+- (void)setRunning:(BOOL)running
+{
+    self.hidden = !running;
+    if (!running || NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) {
+        [_arc removeAnimationForKey:@"rotation"];
+    } else if (![_arc animationForKey:@"rotation"]) {
+        auto* rotate = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
+        rotate.toValue = @(-6.28318530718);
+        rotate.duration = .85;
+        rotate.repeatCount = HUGE_VALF;
+        [_arc addAnimation:rotate forKey:@"rotation"];
+    }
+}
+@end
 
 @interface AuroraConnectWindow : NSWindowController <NSWindowDelegate> {
 @public
     std::function<void()> dismiss;
+    std::function<void()> retry;
     std::function<void()> confirmQuit;
 @private
     NSTextField* _title;
     NSTextView* _detail;
     NSScrollView* _detailScroll;
-    NSProgressIndicator* _spinner;
-    NSButton* _dismissButton;
+    AuroraConnectSpinner* _spinner;
+    NSButton* _retryButton;
     NSButton* _quitButton;
 }
+- (instancetype)initWithDeviceName:(NSString*)deviceName;
 - (void)showTitle:(NSString*)title detail:(NSString*)detail
          progress:(BOOL)progress failure:(BOOL)failure offerQuit:(BOOL)offerQuit;
+- (void)stopProgress;
 @end
 
 @implementation AuroraConnectWindow
-- (instancetype)init
+- (instancetype)initWithDeviceName:(NSString*)deviceName
 {
-    NSWindow* window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 520, 310)
-        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable
+    const auto usable = NSScreen.mainScreen.visibleFrame;
+    const CGFloat width = std::max<CGFloat>(400, std::min<CGFloat>(1000, NSWidth(usable) - 36));
+    const CGFloat height = std::max<CGFloat>(236, std::min<CGFloat>(576, NSHeight(usable) - 72));
+    auto* window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, width, height)
+        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+                  NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
         backing:NSBackingStoreBuffered defer:NO];
     if (!window) {
         [self release];
         return nil;
     }
-    window.title = @"Aurora";
+    window.title = deviceName;
     window.releasedWhenClosed = NO;
+    window.contentMinSize = NSMakeSize(400, 236);
     self = [super initWithWindow:window];
     [window release];
     if (!self) return nil;
 
     self.window.delegate = self;
+    installAuroraConnectionToolbar(self.window, deviceName, self, @selector(dismissWindow:));
     [self.window center];
     NSView* content = self.window.contentView;
-
-    NSString* brandPath = [NSBundle.mainBundle pathForResource:@"AuroraStreamBrand" ofType:@"png"];
-    NSImage* brand = brandPath ? [[[NSImage alloc] initWithContentsOfFile:brandPath] autorelease] : nil;
-    NSImageView* logo = [[[NSImageView alloc] initWithFrame:NSMakeRect(30, 226, 52, 52)] autorelease];
-    logo.image = brand ?: NSApp.applicationIconImage;
-    logo.imageScaling = NSImageScaleProportionallyUpOrDown;
-    [content addSubview:logo];
-
-    NSTextField* name = [NSTextField labelWithString:@"Aurora"];
-    name.font = [NSFont systemFontOfSize:22 weight:NSFontWeightSemibold];
-    name.frame = NSMakeRect(94, 237, 382, 30);
-    [content addSubview:name];
+    content.wantsLayer = YES;
+    content.layer.backgroundColor = rgb(0xf9fafc).CGColor;
 
     _title = [NSTextField labelWithString:@""];
-    _title.frame = NSMakeRect(30, 178, 460, 30);
-    _title.font = [NSFont systemFontOfSize:19 weight:NSFontWeightSemibold];
+    _title.font = [NSFont systemFontOfSize:18 weight:NSFontWeightSemibold];
+    _title.textColor = rgb(0x19283f);
+    _title.alignment = NSTextAlignmentCenter;
     _title.lineBreakMode = NSLineBreakByTruncatingTail;
     [content addSubview:_title];
 
-    _detailScroll = [[[NSScrollView alloc] initWithFrame:NSMakeRect(25, 75, 470, 96)] autorelease];
+    _spinner = [[[AuroraConnectSpinner alloc] init] autorelease];
+    [content addSubview:_spinner];
+
+    _detailScroll = [[[NSScrollView alloc] initWithFrame:NSZeroRect] autorelease];
     _detailScroll.drawsBackground = NO;
     _detailScroll.hasVerticalScroller = YES;
     _detailScroll.autohidesScrollers = YES;
-    _detail = [[[NSTextView alloc] initWithFrame:_detailScroll.contentView.bounds] autorelease];
+    _detail = [[[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 380, 72)] autorelease];
     _detail.drawsBackground = NO;
     _detail.editable = NO;
     _detail.selectable = YES;
     _detail.verticallyResizable = YES;
-    _detail.textContainer.containerSize = NSMakeSize(NSWidth(_detail.bounds), CGFLOAT_MAX);
     _detail.autoresizingMask = NSViewWidthSizable;
     _detail.textContainer.widthTracksTextView = YES;
+    _detail.textContainer.lineFragmentPadding = 0;
     _detailScroll.documentView = _detail;
     [content addSubview:_detailScroll];
 
-    _spinner = [[[NSProgressIndicator alloc] initWithFrame:NSMakeRect(30, 27, 22, 22)] autorelease];
-    _spinner.style = NSProgressIndicatorStyleSpinning;
-    _spinner.indeterminate = YES;
-    _spinner.displayedWhenStopped = NO;
-    [content addSubview:_spinner];
-
-    _dismissButton = [NSButton buttonWithTitle:@"" target:self action:@selector(dismissWindow:)];
-    _dismissButton.keyEquivalent = @"\033";
-    [content addSubview:_dismissButton];
-
-    _quitButton = [NSButton buttonWithTitle:nativeText(QStringLiteral("退出应用"))
-                                    target:self action:@selector(quitPreviousApp:)];
+    _retryButton = [NSButton buttonWithTitle:@"重试" target:self action:@selector(retryConnection:)];
+    _retryButton.bezelStyle = NSBezelStyleRounded;
+    _retryButton.bezelColor = rgb(0x087cf5);
+    [content addSubview:_retryButton];
+    _quitButton = [NSButton buttonWithTitle:@"退出应用" target:self action:@selector(quitPreviousApp:)];
+    _quitButton.bezelStyle = NSBezelStyleRounded;
     [content addSubview:_quitButton];
-
     return self;
+}
+
+- (void)layoutBody
+{
+    const NSRect area = self.window.contentView.bounds;
+    const CGFloat width = std::min<CGFloat>(420, NSWidth(area) - 40);
+    const CGFloat left = NSMidX(area) - width / 2;
+    const CGFloat middle = NSMidY(area);
+    if (!_spinner.hidden) {
+        // The ring and heading share the video's visual center.
+        _spinner.frame = NSMakeRect(NSMidX(area) - ProgressSize / 2, middle + 5, ProgressSize, ProgressSize);
+        _title.frame = NSMakeRect(left, middle - 31, width, 24);
+        return;
+    }
+
+    _title.frame = NSMakeRect(left, middle + 57, width, 24);
+    _detailScroll.frame = NSMakeRect(left, middle - 34, width, 72);
+    const auto buttonFrame = NSMakeRect(NSMidX(area) - 48, middle - 75, 96, 32);
+    _retryButton.frame = buttonFrame;
+    _quitButton.frame = buttonFrame;
 }
 
 - (void)showTitle:(NSString*)title detail:(NSString*)detail
          progress:(BOOL)progress failure:(BOOL)failure offerQuit:(BOOL)offerQuit
 {
+    setAuroraConnectionToolbarFailed(self.window, failure);
     _title.stringValue = title;
-    _title.toolTip = title;
-    _detail.string = detail;
-    _detail.font = [NSFont systemFontOfSize:14];
-    _detail.textColor = NSColor.secondaryLabelColor;
-    [_detail scrollRangeToVisible:NSMakeRange(0, 0)];
-    if (progress) {
-        [_spinner startAnimation:nil];
+    _title.toolTip = progress ? detail : title;
+    if (progress && detail.length) {
+        [_title setAccessibilityHelp:detail];
     } else {
-        [_spinner stopAnimation:nil];
+        [_title setAccessibilityHelp:nil];
     }
-
-    _dismissButton.title = nativeText(failure ? QStringLiteral("关闭") : QStringLiteral("取消"));
-    _dismissButton.keyEquivalent = failure ? @"\r" : @"\033";
-    [_dismissButton sizeToFit];
-    [_quitButton sizeToFit];
-    const NSSize dismissSize = _dismissButton.frame.size;
-    const NSSize quitSize = _quitButton.frame.size;
-    _dismissButton.frame = NSMakeRect(490 - dismissSize.width, 22, dismissSize.width, dismissSize.height);
-    _quitButton.frame = NSMakeRect(NSMinX(_dismissButton.frame) - quitSize.width - 8, 22,
-                                   quitSize.width, quitSize.height);
+    _detailScroll.hidden = progress || !detail.length;
+    _detail.string = progress ? @"" : detail;
+    _detail.font = [NSFont systemFontOfSize:13];
+    _detail.textColor = rgb(0x526176);
+    _detail.alignment = NSTextAlignmentCenter;
+    [_detail scrollRangeToVisible:NSMakeRange(0, 0)];
+    _retryButton.hidden = !failure;
+    _retryButton.keyEquivalent = failure ? @"\r" : @"";
     _quitButton.hidden = !offerQuit;
-
+    [_spinner setRunning:progress];
+    [self layoutBody];
     if (!self.window.visible) [self.window makeKeyAndOrderFront:nil];
 }
 
-- (void)dismissWindow:(id)sender
-{
-    dismiss();
-}
-
-- (void)quitPreviousApp:(id)sender
-{
-    confirmQuit();
-}
+- (void)windowDidResize:(NSNotification*)notification { [self layoutBody]; }
+- (void)stopProgress { [_spinner setRunning:NO]; }
+- (void)dismissWindow:(id)sender { if (dismiss) dismiss(); }
+- (void)retryConnection:(id)sender { if (retry) retry(); }
+- (void)quitPreviousApp:(id)sender { if (confirmQuit) confirmQuit(); }
 
 - (BOOL)windowShouldClose:(NSWindow*)sender
 {
-    dismiss();
+    if (dismiss) dismiss();
     return NO;
 }
 @end
 
-int runAuroraMacStream(QGuiApplication& app, const QString& host, const QString& appName,
-                       StreamingPreferences* preferences)
+static int runConnectionAttempt(QGuiApplication& app, const QString& host, const QString& appName,
+                                StreamingPreferences* preferences, AuroraConnectWindow* window)
 {
     @autoreleasepool {
-        app.setApplicationDisplayName(QStringLiteral("Aurora"));
         ComputerManager manager(preferences);
         CliStartStream::Launcher launcher(host, appName, preferences);
-        auto* window = [[AuroraConnectWindow alloc] init];
-        if (!window) return 1;
 
         Session* session = nullptr;
         bool cancelled = false;
@@ -170,8 +235,7 @@ int runAuroraMacStream(QGuiApplication& app, const QString& host, const QString&
 
         auto showProgress = [&](const QString& detail) {
             if (cancelled) return;
-            [window showTitle:nativeText(QStringLiteral("正在连接 %1").arg(host))
-                       detail:nativeText(detail) progress:YES failure:NO offerQuit:NO];
+            [window showTitle:@"正在连接…" detail:nativeText(detail) progress:YES failure:NO offerQuit:NO];
         };
         auto showFailure = [&](const QString& detail) {
             if (cancelled || failed) return;
@@ -190,6 +254,9 @@ int runAuroraMacStream(QGuiApplication& app, const QString& host, const QString&
             }
             cancelled = true;
             session->cancelAuroraConnection();
+        };
+        window->retry = [&]() {
+            if (failed && session == nullptr) app.exit(RetryConnection);
         };
         window->confirmQuit = [&]() {
             quittingPreviousApp = true;
@@ -231,6 +298,7 @@ int runAuroraMacStream(QGuiApplication& app, const QString& host, const QString&
             });
             QObject::connect(session, &Session::connectionStarted, &launcher, [&]() {
                 connected = true;
+                [window stopProgress];
                 [window.window orderOut:nil];
             });
             QObject::connect(session, &Session::sessionFinished, &launcher, [&](int portTestResult) {
@@ -275,6 +343,29 @@ int runAuroraMacStream(QGuiApplication& app, const QString& host, const QString&
 
         // Keep the paired host and Session alive until deferred stream cleanup has finished.
         QThreadPool::globalInstance()->waitForDone();
+        window->dismiss = {};
+        window->confirmQuit = {};
+        window->retry = {};
+        return result;
+    }
+}
+
+int runAuroraMacStream(QGuiApplication& app, const QString& host, const QString& appName,
+                       StreamingPreferences* preferences)
+{
+    @autoreleasepool {
+        app.setApplicationDisplayName(QStringLiteral("Aurora"));
+        const auto preferred = qEnvironmentVariable("AURORA_STREAM_DEVICE_NAME").simplified();
+        auto* window = [[AuroraConnectWindow alloc] initWithDeviceName:
+            preferred.isEmpty() ? @"远程设备" : nativeText(preferred)];
+        if (!window) return 1;
+
+        int result;
+        do {
+            result = runConnectionAttempt(app, host, appName, preferences, window);
+        } while (result == RetryConnection);
+
+        [window stopProgress];
         window.window.delegate = nil;
         [window.window close];
         [window release];

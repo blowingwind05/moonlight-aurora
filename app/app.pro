@@ -390,7 +390,7 @@ macx {
         HEADERS += cli/aurora-mac-stream.h
         HEADERS += streaming/aurora-session-toolbar.h streaming/aurora-session-privacy.h \
                    streaming/aurora-session-toolbar-layout.h
-        LIBS += -framework CoreFoundation
+        LIBS += -framework CoreFoundation -framework QuartzCore
     }
 
     SOURCES += \
