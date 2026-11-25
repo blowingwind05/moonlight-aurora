@@ -12,6 +12,7 @@
 #include <SDL_syswm.h>
 #include <QThreadPool>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 
@@ -28,6 +29,18 @@ namespace {
     char ControllerKey;
 
     enum class BitrateMode { Unchecked, SavedOnly, Live, Retry };
+
+    struct PrivacyChoice {
+        NSString* label;
+        AuroraPrivacyOperation operation;
+        AuroraPrivacyState state;
+    };
+
+    const std::array<PrivacyChoice, 3> PrivacyChoices{{
+        {@"关闭", AuroraPrivacyOperation::Disable, AuroraPrivacyState::Off},
+        {@"关闭显示器", AuroraPrivacyOperation::DisplayOff, AuroraPrivacyState::DisplayOff},
+        {@"隐私屏保", AuroraPrivacyOperation::Enable, AuroraPrivacyState::On},
+    }};
 
     NSColor* rgb(unsigned color)
     {
@@ -953,20 +966,32 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
                 static_cast<NSInteger>(AuroraToolbarAction::ReleaseMouse));
             break;
         case 4: {
-            label(@"隐私屏保");
+            label(@"隐私保护");
             const bool hasTarget = privacy && privacy->live && !privacy->target.program.isEmpty();
             const auto state = hasTarget ? privacy->state : AuroraPrivacyState::Unavailable;
             const bool busy = hasTarget && privacy->busy;
-            if (busy) label(@"正在确认隐私屏保状态…", YES);
-            else if (state == AuroraPrivacyState::Unavailable) label(@"当前会话不支持隐私屏保", YES);
+
+            NSMutableArray<NSString*>* labels = [NSMutableArray arrayWithCapacity:PrivacyChoices.size()];
+            NSInteger selected = -1;
+            for (const auto& choice : PrivacyChoices) {
+                if (state == choice.state) selected = labels.count;
+                [labels addObject:choice.label];
+            }
+            auto* modes = [NSSegmentedControl segmentedControlWithLabels:labels
+                trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(changePrivacyMode:)];
+            modes.frame = NSMakeRect(8, y, 258, 26);
+            modes.selectedSegment = selected;
+            modes.enabled = !busy && selected >= 0;
+            [modes setAccessibilityLabel:@"隐私保护"];
+            [body addSubview:modes];
+            y += 32;
+
+            if (busy) label(@"正在确认隐私保护…", YES);
+            else if (state == AuroraPrivacyState::Unavailable) label(@"当前会话不支持隐私保护", YES);
             else if (privacy->changeRejected) label(@"主机未切换到所选状态", YES);
-            else if (state == AuroraPrivacyState::Error) label(@"无法确认隐私屏保状态", YES);
-            else if (state == AuroraPrivacyState::On) label(@"隐私屏保已开启", YES);
-            else if (state == AuroraPrivacyState::Off) label(@"隐私屏保已关闭", YES);
-            if (hasTarget && state != AuroraPrivacyState::Unavailable) {
-                row(state == AuroraPrivacyState::On ? @"关闭隐私屏保" : state == AuroraPrivacyState::Off
-                    ? @"开启隐私屏保" : @"重新检查", @"shield", @selector(togglePrivacy:), 0);
-                ((NSButton*)body.subviews.lastObject).enabled = !busy;
+            else if (selected < 0) {
+                label(@"无法确认隐私保护", YES);
+                row(@"重新检查", @"shield", @selector(refreshPrivacy:), 0);
             }
             break;
         }
@@ -1353,9 +1378,11 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
             current->busy = false;
             current->lastStatusCheck.restart();
             current->state = result;
-            current->changeRejected =
-                (operation == AuroraPrivacyOperation::Enable && result == AuroraPrivacyState::Off) ||
-                (operation == AuroraPrivacyOperation::Disable && result == AuroraPrivacyState::On);
+            const auto choice = std::find_if(PrivacyChoices.begin(), PrivacyChoices.end(),
+                [operation](const PrivacyChoice& option) { return option.operation == operation; });
+            current->changeRejected = choice != PrivacyChoices.end() &&
+                result != AuroraPrivacyState::Unavailable && result != AuroraPrivacyState::Error &&
+                result != choice->state;
             AuroraSessionToolbarController* toolbar = auroraToolbar(nativeWindow(SDL_GetWindowFromID(windowId)));
             if (toolbar && toolbar->privacy == current) {
                 [toolbar updatePrivacyMenu];
@@ -1365,12 +1392,19 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     });
 }
 
-- (void)togglePrivacy:(NSButton*)sender
+- (void)changePrivacyMode:(NSSegmentedControl*)sender
 {
-    if (!privacy || privacy->busy) return;
-    const auto operation = privacy->state == AuroraPrivacyState::On ? AuroraPrivacyOperation::Disable :
-        privacy->state == AuroraPrivacyState::Off ? AuroraPrivacyOperation::Enable : AuroraPrivacyOperation::Status;
-    [self requestPrivacy:operation];
+    const NSInteger selected = sender.selectedSegment;
+    if (!sender.enabled || !privacy || selected < 0 ||
+        selected >= static_cast<NSInteger>(PrivacyChoices.size())) return;
+
+    const auto& choice = PrivacyChoices[selected];
+    if (choice.state != privacy->state) [self requestPrivacy:choice.operation];
+}
+
+- (void)refreshPrivacy:(NSButton*)sender
+{
+    [self requestPrivacy:AuroraPrivacyOperation::Status];
 }
 
 - (void)dealloc

@@ -395,7 +395,7 @@ static int runAuroraPairedCommand(int argc, char** argv)
     }
     if (!bitrate && argc != 5) {
         fprintf(stderr, "Usage: AuroraStream --aurora-runtime %s <ip:port> <host-uuid> <%s>\n",
-            command, probe ? "sample|access" : privacy ? "status|on|off" : "restart|shutdown");
+            command, probe ? "sample|access" : privacy ? "status|on|off|display-off" : "restart|shutdown");
         return 2;
     }
 #ifdef Q_OS_MACOS
@@ -418,7 +418,7 @@ static int runAuroraPairedCommand(int argc, char** argv)
     const int httpsPort = port + DEFAULT_HTTPS_PORT - DEFAULT_HTTP_PORT;
     const bool validAction = bitrate || (probe
         ? (action == "sample" || probeAccess) && NvHTTP::hasAuthenticatedHostFingerprint()
-        : privacy ? (action == "status" || action == "on" || action == "off")
+        : privacy ? (action == "status" || action == "on" || action == "off" || action == "display-off")
                   : (action == "restart" || action == "shutdown"));
     if (address.isNull() || port > 65535 || httpsPort <= 0 ||
             !uuidPattern.match(uuid).hasMatch() || !validAction) {

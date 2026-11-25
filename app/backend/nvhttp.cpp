@@ -500,7 +500,7 @@ void NvHTTP::sendAuroraPower(const QString& action, const QSslConfiguration& cli
 
 QByteArray NvHTTP::sendAuroraPrivacy(const QString& action, const QSslConfiguration& clientIdentity)
 {
-    if (action != "status" && action != "on" && action != "off") {
+    if (action != "status" && action != "on" && action != "off" && action != "display-off") {
         throw GfeHttpResponseException(400, "Invalid Aurora privacy request");
     }
 
@@ -508,7 +508,7 @@ QByteArray NvHTTP::sendAuroraPrivacy(const QString& action, const QSslConfigurat
     const auto response = reply->read(AURORA_PAIRED_RESPONSE_LIMIT + 1);
     if (reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 200 ||
             (response != QByteArrayLiteral("on") && response != QByteArrayLiteral("off") &&
-             response != QByteArrayLiteral("unavailable"))) {
+             response != QByteArrayLiteral("display-off") && response != QByteArrayLiteral("unavailable"))) {
         throw GfeHttpResponseException(400, "Invalid Aurora privacy response");
     }
     return response;

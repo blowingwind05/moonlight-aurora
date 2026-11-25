@@ -139,11 +139,13 @@ AuroraPrivacyState runAuroraPrivacyCommand(const AuroraPrivacyTarget& target, Au
     case AuroraPrivacyOperation::Status: break;
     case AuroraPrivacyOperation::Enable: verb = "on"; break;
     case AuroraPrivacyOperation::Disable: verb = "off"; break;
+    case AuroraPrivacyOperation::DisplayOff: verb = "display-off"; break;
     }
     const auto output = runAuroraSessionCommand(target, QStringLiteral("privacy"),
         {QString::fromLatin1(verb)}, 16, live);
     if (output == "on") return AuroraPrivacyState::On;
     if (output == "off") return AuroraPrivacyState::Off;
+    if (output == "display-off") return AuroraPrivacyState::DisplayOff;
     if (output == "unavailable") return AuroraPrivacyState::Unavailable;
     return AuroraPrivacyState::Error;
 }

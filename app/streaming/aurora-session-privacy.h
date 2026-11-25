@@ -15,12 +15,14 @@ enum class AuroraPrivacyOperation {
     Status,
     Enable,
     Disable,
+    DisplayOff,
 };
 
 enum class AuroraPrivacyState {
     Unknown,
     On,
     Off,
+    DisplayOff,
     Unavailable,
     Error,
 };
