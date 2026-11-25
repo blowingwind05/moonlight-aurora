@@ -218,8 +218,9 @@ private:
                    const QSslConfiguration* pinnedPostIdentity = nullptr,
                    bool* pairedNotFound = nullptr);
 
-    QNetworkReply* openAuroraPairedPost(const QString& command, const QString& action,
-                                      const QSslConfiguration& clientIdentity);
+    QNetworkReply* openAuroraPairedPost(const QString& command, const QString& query,
+                                      const QSslConfiguration& clientIdentity, qint64 maxBytes,
+                                      bool* pairedNotFound = nullptr);
 
     NvAddress m_Address;
     QNetworkAccessManager m_Nam;

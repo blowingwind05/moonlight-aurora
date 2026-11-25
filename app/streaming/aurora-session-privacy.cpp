@@ -147,6 +147,7 @@ AuroraPrivacyState runAuroraPrivacyCommand(const AuroraPrivacyTarget& target, Au
     if (output == "off") return AuroraPrivacyState::Off;
     if (output == "display-off") return AuroraPrivacyState::DisplayOff;
     if (output == "unavailable") return AuroraPrivacyState::Unavailable;
+    if (output == "unsupported") return AuroraPrivacyState::Unsupported;
     return AuroraPrivacyState::Error;
 }
 

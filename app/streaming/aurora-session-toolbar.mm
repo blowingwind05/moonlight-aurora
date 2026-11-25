@@ -987,7 +987,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
             y += 32;
 
             if (busy) label(@"正在确认隐私保护…", YES);
-            else if (state == AuroraPrivacyState::Unavailable) label(@"当前会话不支持隐私保护", YES);
+            else if (!hasTarget || state == AuroraPrivacyState::Unsupported) label(@"当前会话不支持隐私保护", YES);
             else if (privacy->changeRejected) label(@"主机未切换到所选状态", YES);
             else if (selected < 0) {
                 label(@"无法确认隐私保护", YES);

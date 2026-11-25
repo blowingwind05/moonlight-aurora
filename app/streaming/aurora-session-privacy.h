@@ -24,6 +24,7 @@ enum class AuroraPrivacyState {
     Off,
     DisplayOff,
     Unavailable,
+    Unsupported,
     Error,
 };
 
@@ -58,6 +59,6 @@ struct AuroraSessionPrivacy {
 
     bool canKeepApplication() const {
         return live && !busy && !bitrateBusy &&
-            (state == AuroraPrivacyState::Off || state == AuroraPrivacyState::Unavailable);
+            (state == AuroraPrivacyState::Off || state == AuroraPrivacyState::Unsupported);
     }
 };
