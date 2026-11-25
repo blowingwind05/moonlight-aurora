@@ -1,0 +1,5 @@
+<RCC>
+  <qresource prefix="/aurora/session">
+    <file>ConnectionStage.qml</file>
+  </qresource>
+</RCC>
