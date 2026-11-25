@@ -741,7 +741,8 @@ private:
         uint16_t httpsPort = 0;
         if (alreadyPaired) {
             certificate = ComputerManager::readSavedCertificate(m_ExpectedPairedHost);
-            if (certificate.isNull() || m_Address.port() <= DEFAULT_HTTP_PORT - DEFAULT_HTTPS_PORT) {
+            if ((certificate.isNull() && !NvHTTP::hasAuthenticatedHostFingerprint()) ||
+                m_Address.port() <= DEFAULT_HTTP_PORT - DEFAULT_HTTPS_PORT) {
                 emit computerAddCompleted(false, false);
                 return;
             }

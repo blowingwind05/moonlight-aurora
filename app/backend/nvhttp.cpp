@@ -47,7 +47,7 @@ NvHTTP::NvHTTP(NvAddress address, uint16_t httpsPort, QSslCertificate serverCert
     if (m_ExactEndpoint) {
         // Check the peer before transmitting the request, even if system trust accepts its certificate.
         connect(&m_Nam, &QNetworkAccessManager::encrypted, this, [this](QNetworkReply* reply) {
-            if (m_ServerCert.isNull() || reply->sslConfiguration().peerCertificate() != m_ServerCert) {
+            if (!matchesServerCertificate(reply->sslConfiguration().peerCertificate())) {
                 reply->setProperty("auroraCertificateMismatch", true);
                 reply->abort();
             }
@@ -65,6 +65,27 @@ NvHTTP::NvHTTP(NvComputer* computer) :
 void NvHTTP::setServerCert(QSslCertificate serverCert)
 {
     m_ServerCert = serverCert;
+}
+
+bool NvHTTP::hasAuthenticatedHostFingerprint()
+{
+#ifdef AURORA_STREAM_HOST_IDENTITY
+    const auto fingerprint = qgetenv("AURORA_GAMESTREAM_HOST_CERTIFICATE_SHA256");
+    return fingerprint.size() == 64 && QByteArray::fromHex(fingerprint).toHex() == fingerprint;
+#else
+    return false;
+#endif
+}
+
+bool NvHTTP::matchesServerCertificate(const QSslCertificate& certificate) const
+{
+    if (certificate.isNull())
+        return false;
+    if (!m_ServerCert.isNull())
+        return certificate == m_ServerCert;
+    return m_ExactEndpoint && hasAuthenticatedHostFingerprint() &&
+        certificate.digest(QCryptographicHash::Sha256).toHex() ==
+            qgetenv("AURORA_GAMESTREAM_HOST_CERTIFICATE_SHA256");
 }
 
 void NvHTTP::setAddress(NvAddress address)
@@ -169,7 +190,7 @@ NvHTTP::getServerInfo(NvLogLevel logLevel, bool fastFail)
     QString serverInfo;
 
     // Check if we have a pinned cert and HTTPS port for this host yet
-    if (!m_ServerCert.isNull() && httpsPort() != 0)
+    if ((!m_ServerCert.isNull() || (m_ExactEndpoint && hasAuthenticatedHostFingerprint())) && httpsPort() != 0)
     {
         try
         {
@@ -558,19 +579,13 @@ void NvHTTP::handleSslErrors(QNetworkReply* reply, const QList<QSslError>& error
 {
     bool ignoreErrors = true;
 
-    if (m_ServerCert.isNull()) {
-        // We should never make an HTTPS request without a cert
-        Q_ASSERT(!m_ServerCert.isNull());
-        return;
-    }
-
-    if (reply->operation() == QNetworkAccessManager::PostOperation &&
-            reply->sslConfiguration().peerCertificate() != m_ServerCert) {
+    if ((m_ExactEndpoint || reply->operation() == QNetworkAccessManager::PostOperation) &&
+            !matchesServerCertificate(reply->sslConfiguration().peerCertificate())) {
         return;
     }
 
     for (const QSslError& error : errors) {
-        if (m_ServerCert != error.certificate()) {
+        if (!matchesServerCertificate(error.certificate())) {
             ignoreErrors = false;
             break;
         }
@@ -620,8 +635,9 @@ NvHTTP::openConnection(QUrl baseUrl,
 #ifdef AURORA_STREAM_HOST_IDENTITY
     if (qEnvironmentVariableIsSet("AURORA_GAMESTREAM_HOST_CERTIFICATE_SHA256")) {
         const auto expected = qgetenv("AURORA_GAMESTREAM_HOST_CERTIFICATE_SHA256");
-        if (!m_ExactEndpoint || baseUrl.scheme() != "https" || m_ServerCert.isNull() ||
-            expected.size() != 64 || m_ServerCert.digest(QCryptographicHash::Sha256).toHex() != expected) {
+        const bool discovering = m_ServerCert.isNull() && command == "serverinfo" && !pinnedPostIdentity;
+        if (!m_ExactEndpoint || baseUrl.scheme() != "https" || !hasAuthenticatedHostFingerprint() ||
+            (!discovering && m_ServerCert.digest(QCryptographicHash::Sha256).toHex() != expected)) {
             throw GfeHttpResponseException(401, "Host certificate does not match the authenticated Aurora device");
         }
     }
@@ -788,10 +804,14 @@ NvHTTP::openConnection(QUrl baseUrl,
             delete reply;
             throw GfeHttpResponseException(400, "Unexpected redirect from the requested pairing endpoint");
         }
-        if (url.scheme() == "https" && (m_ServerCert.isNull() ||
-                reply->sslConfiguration().peerCertificate() != m_ServerCert)) {
-            delete reply;
-            throw GfeHttpResponseException(401, "Server certificate mismatch");
+        if (url.scheme() == "https") {
+            const auto certificate = reply->sslConfiguration().peerCertificate();
+            if (!matchesServerCertificate(certificate)) {
+                delete reply;
+                throw GfeHttpResponseException(401, "Server certificate mismatch");
+            }
+            // The TLS peer has already matched the supplied fingerprint before the GET.
+            m_ServerCert = certificate;
         }
     }
 

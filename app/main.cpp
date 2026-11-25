@@ -352,7 +352,7 @@ static int runAuroraPairedCommand(int argc, char** argv)
     }
     if (!bitrate && argc != 5) {
         fprintf(stderr, "Usage: AuroraStream --aurora-runtime %s <ip:port> <host-uuid> <%s>\n",
-            command, privacy ? "status|on|off" : "restart|shutdown");
+            command, probe ? "sample|access" : privacy ? "status|on|off" : "restart|shutdown");
         return 2;
     }
 #ifdef Q_OS_MACOS
@@ -364,6 +364,7 @@ static int runAuroraPairedCommand(int argc, char** argv)
         return 2;
     }
     const auto action = args[4];
+    const bool probeAccess = probe && action == "access";
     const auto endpoint = QRegularExpression(QStringLiteral(
         R"(\A(?:\[([0-9A-Fa-f:.]+)\]|([0-9]{1,3}(?:\.[0-9]{1,3}){3})):([0-9]{1,5})\z)")).match(args[2]);
     const QHostAddress address(endpoint.captured(1).isEmpty() ? endpoint.captured(2) : endpoint.captured(1));
@@ -373,7 +374,7 @@ static int runAuroraPairedCommand(int argc, char** argv)
         R"(\A[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\z)"));
     const int httpsPort = port + DEFAULT_HTTPS_PORT - DEFAULT_HTTP_PORT;
     const bool validAction = bitrate || (probe
-        ? action == "sample" && qgetenv("AURORA_GAMESTREAM_HOST_CERTIFICATE_SHA256").size() == 64
+        ? (action == "sample" || probeAccess) && NvHTTP::hasAuthenticatedHostFingerprint()
         : privacy ? (action == "status" || action == "on" || action == "off")
                   : (action == "restart" || action == "shutdown"));
     if (address.isNull() || port > 65535 || httpsPort <= 0 ||
@@ -391,7 +392,7 @@ static int runAuroraPairedCommand(int argc, char** argv)
     }
 
     const auto certificate = ComputerManager::readSavedCertificate(uuid);
-    if (certificate.isNull()) {
+    if (certificate.isNull() && !probe) {
         fputs("Aurora has no saved pairing certificate for this host.\n", stderr);
         return 3;
     }
@@ -405,7 +406,8 @@ static int runAuroraPairedCommand(int argc, char** argv)
         if (probe) {
             std::array<qint64, 3> measured{};
             int successful = 0;
-            for (size_t trial = 0; trial < measured.size(); ++trial) {
+            const size_t sampleCount = probeAccess ? 1 : measured.size();
+            for (size_t trial = 0; trial < sampleCount; ++trial) {
                 QElapsedTimer timer;
                 timer.start();
                 try {
@@ -419,6 +421,12 @@ static int runAuroraPairedCommand(int argc, char** argv)
                 } catch (const QtNetworkReplyException&) {
                     // A timeout or connection failure is an unsuccessful sample.
                 }
+            }
+            if (probeAccess) {
+                if (successful != 1)
+                    return 4;
+                puts("aurora-route-access/1,authorized");
+                return 0;
             }
             std::sort(measured.begin(), measured.begin() + successful);
             const qint64 median = successful

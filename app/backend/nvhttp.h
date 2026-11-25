@@ -160,6 +160,7 @@ public:
 
     static NvAddress gameStreamRelayAddress();
     static uint16_t gameStreamRelayBase(const NvAddress& address);
+    static bool hasAuthenticatedHostFingerprint();
 
     uint16_t httpPort();
 
@@ -203,6 +204,7 @@ public:
     QUrl m_BaseUrlHttp;
     QUrl m_BaseUrlHttps;
 private:
+    bool matchesServerCertificate(const QSslCertificate& certificate) const;
     void
     handleSslErrors(QNetworkReply* reply, const QList<QSslError>& errors);
 
