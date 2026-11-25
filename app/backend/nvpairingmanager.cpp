@@ -1,4 +1,5 @@
 #include "nvpairingmanager.h"
+#include "nvcomputer.h"
 #include "utils.h"
 
 #include <stdexcept>
@@ -10,9 +11,23 @@
 #include <openssl/evp.h>
 
 #define REQUEST_TIMEOUT_MS 5000
+#define AURORA_CERT_TIMEOUT_MS (5 * 60 * 1000)
 
-NvPairingManager::NvPairingManager(NvComputer* computer) :
-    m_Http(computer)
+static QSslCertificate getPairingHostCertificate(NvComputer* computer, const NvAddress& pairAddress)
+{
+    if (!pairAddress.isNull()) {
+        QReadLocker lock(&computer->lock);
+        return computer->serverCert;
+    }
+    return computer->serverCert;
+}
+
+NvPairingManager::NvPairingManager(NvComputer* computer, const NvAddress& pairAddress) :
+    m_Http(pairAddress.isNull() ? computer->activeAddress : pairAddress,
+           pairAddress.isNull() ? computer->activeHttpsPort : 0,
+           getPairingHostCertificate(computer, pairAddress), !pairAddress.isNull()),
+    m_ExactEndpoint(!pairAddress.isNull()),
+    m_ExpectedHostId(m_ExactEndpoint ? computer->uuid : QString())
 {
     QByteArray cert = IdentityManager::get()->getCertificate();
     BIO *bio = BIO_new_mem_buf(cert.data(), -1);
@@ -188,8 +203,25 @@ NvPairingManager::saltPin(const QByteArray& salt, QString pin)
 }
 
 NvPairingManager::PairState
-NvPairingManager::pair(QString appVersion, QString pin, QSslCertificate& serverCert)
+NvPairingManager::pair(QString appVersion, QString pin, QSslCertificate& serverCert, const QString& deviceName)
 {
+    if (m_ExactEndpoint) {
+        const QString serverInfo = m_Http.getServerInfo(NvHTTP::NVLL_ERROR, true);
+        if (m_ExpectedHostId.isEmpty() || NvHTTP::getXmlString(serverInfo, "uniqueid") != m_ExpectedHostId) {
+            qWarning() << "Requested pairing endpoint reported a different host identity";
+            return PairState::FAILED;
+        }
+        if (!m_Http.serverCert().isNull() && NvHTTP::getXmlString(serverInfo, "PairStatus") == "1") {
+            return PairState::ALREADY_PAIRED;
+        }
+        appVersion = NvHTTP::getXmlString(serverInfo, "appversion");
+        bool validVersion;
+        if (appVersion.section('.', 0, 0).toInt(&validVersion) <= 0 || !validVersion) {
+            qWarning() << "Requested pairing endpoint did not report a valid app version";
+            return PairState::FAILED;
+        }
+    }
+
     int serverMajorVersion = NvHTTP::parseQuad(appVersion).at(0);
     qInfo() << "Pairing with server generation:" << serverMajorVersion;
 
@@ -216,9 +248,10 @@ NvPairingManager::pair(QString appVersion, QString pin, QSslCertificate& serverC
 
     QString getCert = m_Http.openConnectionToString(m_Http.m_BaseUrlHttp,
                                                     "pair",
-                                                    "devicename=roth&updateState=1&phrase=getservercert&salt=" +
+                                                    "devicename=" + (deviceName.isEmpty() ? QStringLiteral("roth") : deviceName) +
+                                                    "&updateState=1&phrase=getservercert&salt=" +
                                                     salt.toHex() + "&clientcert=" + IdentityManager::get()->getCertificate().toHex(),
-                                                    0);
+                                                    deviceName.isEmpty() ? 0 : AURORA_CERT_TIMEOUT_MS);
     NvHTTP::verifyResponseStatus(getCert);
     if (NvHTTP::getXmlString(getCert, "paired") != "1")
     {
@@ -240,6 +273,11 @@ NvPairingManager::pair(QString appVersion, QString pin, QSslCertificate& serverC
 
         qCritical() << "Failed to parse plaincert";
         m_Http.openConnectionToString(m_Http.m_BaseUrlHttp, "unpair", nullptr, REQUEST_TIMEOUT_MS);
+        return PairState::FAILED;
+    }
+
+    if (m_ExactEndpoint && !m_Http.serverCert().isNull() && unverifiedServerCert != m_Http.serverCert()) {
+        qWarning() << "Pairing certificate differs from the existing pinned certificate";
         return PairState::FAILED;
     }
 

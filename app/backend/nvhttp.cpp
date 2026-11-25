@@ -18,8 +18,9 @@
 #define RESUME_TIMEOUT_MS 30000
 #define QUIT_TIMEOUT_MS 30000
 
-NvHTTP::NvHTTP(NvAddress address, uint16_t httpsPort, QSslCertificate serverCert) :
-    m_ServerCert(serverCert)
+NvHTTP::NvHTTP(NvAddress address, uint16_t httpsPort, QSslCertificate serverCert, bool exactEndpoint) :
+    m_ServerCert(serverCert),
+    m_ExactEndpoint(exactEndpoint)
 {
     m_BaseUrlHttp.setScheme("http");
     m_BaseUrlHttps.setScheme("https");
@@ -142,7 +143,7 @@ NvHTTP::getServerInfo(NvLogLevel logLevel, bool fastFail)
         }
         catch (const GfeHttpResponseException& e)
         {
-            if (e.getStatusCode() == 401)
+            if (e.getStatusCode() == 401 && !m_ExactEndpoint)
             {
                 // Certificate validation error, fallback to HTTP
                 serverInfo = openConnectionToString(m_BaseUrlHttp,
@@ -485,6 +486,10 @@ NvHTTP::openConnection(QUrl baseUrl,
 
     QNetworkRequest request(url);
 
+    if (m_ExactEndpoint) {
+        request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
+    }
+
     // Add our client certificate
     request.setSslConfiguration(IdentityManager::get()->getSslConfig());
 
@@ -551,6 +556,18 @@ NvHTTP::openConnection(QUrl baseUrl,
             QtNetworkReplyException exception(reply->error(), reply->errorString());
             delete reply;
             throw exception;
+        }
+    }
+
+    if (m_ExactEndpoint) {
+        if (reply->attribute(QNetworkRequest::RedirectionTargetAttribute).isValid()) {
+            delete reply;
+            throw GfeHttpResponseException(400, "Unexpected redirect from the requested pairing endpoint");
+        }
+        if (url.scheme() == "https" && (m_ServerCert.isNull() ||
+                reply->sslConfiguration().peerCertificate() != m_ServerCert)) {
+            delete reply;
+            throw GfeHttpResponseException(401, "Server certificate mismatch");
         }
     }
 

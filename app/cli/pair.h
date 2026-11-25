@@ -1,5 +1,7 @@
 #pragma once
 
+#include "backend/nvaddress.h"
+
 #include <QObject>
 #include <QVariant>
 
@@ -21,7 +23,7 @@ class Launcher : public QObject
 
 public:
     explicit Launcher(QString computer, QString predefinedPin,
-                      QObject *parent = nullptr);
+                      QObject *parent = nullptr, QString deviceName = {}, NvAddress pairAddress = {});
     ~Launcher();
     Q_INVOKABLE void execute(ComputerManager *manager);
     Q_INVOKABLE bool isExecuted() const;
@@ -30,6 +32,7 @@ signals:
     void searchingComputer();
     void pairing(QString pcName, QString pin);
     void failed(QString text);
+    void alreadyPaired();
     void success();
 
 private slots:

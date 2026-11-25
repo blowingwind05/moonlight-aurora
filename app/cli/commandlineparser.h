@@ -1,5 +1,6 @@
 #pragma once
 
+#include "backend/nvaddress.h"
 #include "settings/streamingpreferences.h"
 
 #include <QMap>
@@ -47,10 +48,14 @@ public:
 
     QString getHost() const;
     QString getPredefinedPin() const;
+    QString getAuroraPairId() const;
+    NvAddress getAuroraPairAddress() const;
 
 private:
     QString m_Host;
     QString m_PredefinedPin;
+    QString m_AuroraPairId;
+    NvAddress m_AuroraPairAddress;
 };
 
 class StreamCommandLineParser
