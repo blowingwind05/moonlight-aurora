@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <QDebug>
 #include <QGuiApplication>
+#include <QQuickStyle>
 #include <QScreen>
 #include <QThreadPool>
 #include <QTimer>
@@ -473,6 +474,7 @@ int runAuroraMacStream(QGuiApplication& app, const QString& host, const QString&
 {
     @autoreleasepool {
         app.setApplicationDisplayName(QStringLiteral("Aurora"));
+        if (auroraMacSessionChromeEnabled()) QQuickStyle::setStyle(QStringLiteral("Fusion"));
         if (qEnvironmentVariableIsSet("AURORA_CONNECTION_DETAILS"))
             AuroraConnectionMonitor::instance().enableParentReporting();
         const auto preferred = qEnvironmentVariable("AURORA_STREAM_DEVICE_NAME").simplified();

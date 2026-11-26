@@ -2134,11 +2134,7 @@ void Session::execInternal()
     SDL_Event event;
     for (;;) {
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
-        const bool qtControlsOpen = auroraQtControlsVisible();
-        if (qtControlsOpen) {
-            // Draw and dispatch the connected Qt menu while SDL owns this thread.
-            QCoreApplication::processEvents(QEventLoop::AllEvents | QEventLoop::ExcludeSocketNotifiers, 4);
-        }
+        const bool qtChromeVisible = serviceAuroraQtChrome(m_Window);
         if (routeSwitchInput.fd >= 0 && poll(&routeSwitchInput, 1, 0) > 0) {
             if (routeSwitchInput.revents & (POLLERR | POLLNVAL)) {
                 routeSwitchInput.fd = -1;
@@ -2187,7 +2183,7 @@ void Session::execInternal()
         // and other problems.
         int eventTimeout = isEmbedded ? 80 : 1000;
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
-        if (qtControlsOpen) eventTimeout = 16;
+        if (qtChromeVisible) eventTimeout = 16;
 #endif
         if (!SDL_WaitEventTimeout(&event, eventTimeout)) {
             presence.runCallbacks();
@@ -2512,11 +2508,19 @@ void Session::execInternal()
 
         case SDL_KEYUP:
         case SDL_KEYDOWN:
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+            if (event.key.windowID == SDL_GetWindowID(m_Window) &&
+                auroraRouteLocalSessionKey(m_Window, event.key, m_InputHandler->isCaptureActive())) break;
+#endif
             presence.runCallbacks();
             m_InputHandler->handleKeyEvent(&event.key);
             break;
         case SDL_MOUSEBUTTONDOWN:
         case SDL_MOUSEBUTTONUP:
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+            if (event.type == SDL_MOUSEBUTTONDOWN && event.button.windowID == SDL_GetWindowID(m_Window))
+                auroraRestoreSessionVideoFocus(m_Window);
+#endif
             presence.runCallbacks();
             m_InputHandler->handleMouseButtonEvent(&event.button);
             break;

@@ -5,6 +5,9 @@
 #include "aurora-session-privacy.h"
 #include "../backend/aurora-bitrate.h"
 #include "../qt-session/AuroraMacControlsView.h"
+#include "../qt-session/AuroraMacTitleBarView.h"
+#include <QElapsedTimer>
+#include <bitset>
 
 #import <AppKit/AppKit.h>
 #import <QuartzCore/QuartzCore.h>
@@ -29,6 +32,14 @@ namespace {
     NSString* const ControlCenterSymbol = @"AuroraSessionControlCenter";
     NSString* const ContextItem = @"AuroraSessionContext";
     NSString* const ActionsItem = @"AuroraSessionActions";
+    NSString* const QtTitleItem = @"AuroraQtSessionTitle";
+    bool qtTitleVisible = false;
+
+    NSRect cocoaAnchor(NSView* view, const QRectF& rect)
+    {
+        const CGFloat y = view.isFlipped ? rect.y() : NSHeight(view.bounds) - rect.bottom();
+        return NSMakeRect(rect.x(), y, rect.width(), rect.height());
+    }
     char ControllerKey;
     bool qtControlsVisible = false;  // Accessed on the SDL/Cocoa main thread.
 
@@ -176,6 +187,30 @@ namespace {
 }
 
 - (BOOL)mouseDownCanMoveWindow { return YES; }
+@end
+
+// A native toolbar item hosts only the Qt title content. Its blank space is
+// still part of AppKit's drag surface, and the SDL content view stays separate.
+@interface AuroraQtTitleHost : AuroraToolbarGroup
+@property(nonatomic, assign) AuroraMacTitleBarView* quick;
+@property(nonatomic, assign) NSView* quickView;
+@end
+
+@implementation AuroraQtTitleHost
+- (void)setFrameSize:(NSSize)size
+{
+    [super setFrameSize:size];
+    self.quickView.frame = self.bounds;
+}
+
+- (NSView*)hitTest:(NSPoint)point
+{
+    NSView* hit = [super hitTest:point];
+    if (!self.quick || hit != self.quickView) return hit;
+    const NSPoint local = [self.quickView convertPoint:point fromView:self.superview];
+    const CGFloat y = self.quickView.isFlipped ? local.y : NSHeight(self.quickView.bounds) - local.y;
+    return self.quick->hasButtonAt(QPointF(local.x, y)) ? hit : self;
+}
 @end
 
 @interface AuroraFocusButton : NSButton {
@@ -721,7 +756,14 @@ namespace {
     NSImageView* _brand;
     AuroraControlPanel* _controlCenter;
     AuroraMacControlsView* _qtControls;
-    AuroraToolbarButton* _controlAnchor;
+    NSView* _controlAnchor;
+    AuroraMacTitleBarView* _qtTitle;
+    AuroraQtTitleHost* _qtTitleHost;
+    QElapsedTimer _qtTitleProbe;
+    BOOL _qtTitleFailed;
+    BOOL _qtTitleHasFrame;
+    BOOL _qtTitleOwnsKeyboard;
+    std::bitset<SDL_NUM_SCANCODES> _localKeys;
     id _controlMonitor;
     NSMutableDictionary<NSString*, NSString*>* _preferences;
     NSTextField* _bitrateLabel;
@@ -766,6 +808,14 @@ namespace {
 - (void)finishBitrateRequest:(const AuroraBitrate::Request&)request reply:(const QByteArray&)reply;
 - (void)closeControlCenter;
 - (void)positionControlCenter;
+- (void)prepareQtTitleBar;
+- (void)checkQtTitleBar;
+- (void)hideQtTitleBar;
+- (void)destroyQtTitleBar;
+- (void)openControlsFrom:(NSView*)source keyboard:(BOOL)keyboard;
+- (void)showDetailsFrom:(NSView*)source bounds:(NSRect)bounds;
+- (BOOL)routeLocalKey:(const SDL_KeyboardEvent&)key captureActive:(BOOL)captureActive;
+- (void)restoreVideoFocus;
 - (void)showControlPage:(NSInteger)page;
 - (void)dispatchControlAction:(AuroraToolbarAction)action;
 @end
@@ -774,6 +824,8 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 {
     return window ? objc_getAssociatedObject(window, &ControllerKey) : nil;
 }
+
+static void installSessionToolbar(NSWindow* native, AuroraSessionToolbarController* controller);
 
 @implementation AuroraSessionToolbarController
 - (instancetype)initWithWindow:(NSWindow*)window deviceName:(NSString*)name connecting:(BOOL)connecting
@@ -868,8 +920,157 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     return button;
 }
 
+- (void)prepareQtTitleBar
+{
+    if (_connectionWindow || _qtTitle || _qtTitleFailed || !auroraMacSessionChromeEnabled() ||
+        qEnvironmentVariable("AURORA_QT_SESSION_TOOLBAR") == QStringLiteral("0")) return;
+
+    auto title = std::make_unique<AuroraMacTitleBarView>(auroraMacSessionQml(QStringLiteral("MacConnectedTitleBar.qml")));
+    if (!title->ready() || title->rootObject()->property("barHeight").toInt() != GroupHeight) {
+        qWarning("Aurora could not load the Qt stream titlebar. Using the native toolbar.");
+        _qtTitleFailed = YES;
+        return;
+    }
+
+    auto* chrome = title->rootObject();
+    chrome->setProperty("deviceName", QString::fromNSString(_device.stringValue));
+    chrome->setProperty("networkPoor", _dot->poor == YES);
+    chrome->setProperty("reduceMotion", NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion == YES);
+
+    auto* view = reinterpret_cast<NSView*>(title->winId());
+    if (!view) {
+        _qtTitleFailed = YES;
+        return;
+    }
+
+    _qtTitle = title.release();
+    _qtTitleHost = [[AuroraQtTitleHost alloc] init];
+    _qtTitleHost.quick = _qtTitle;
+    _qtTitleHost.quickView = view;
+    view.frame = _qtTitleHost.bounds;
+    [_qtTitleHost addSubview:view];
+
+    _qtTitle->onControls = [self](bool keyboard) {
+        _qtTitleOwnsKeyboard = YES;
+        [self openControlsFrom:_qtTitleHost.quickView keyboard:keyboard];
+    };
+    _qtTitle->onConnection = [self](const QRectF& anchor) {
+        _qtTitleOwnsKeyboard = YES;
+        sendAction(streamWindowId, AuroraToolbarAction::ReleaseMouse);
+        NSView* view = _qtTitleHost.quickView;
+        [self showDetailsFrom:_qtTitleHost
+                      bounds:[view convertRect:cocoaAnchor(view, anchor) toView:_qtTitleHost]];
+    };
+    QObject::connect(_qtTitle, &QQuickWindow::frameSwapped, _qtTitle, [self] {
+        _qtTitleHasFrame = YES;
+    }, Qt::QueuedConnection);
+    QObject::connect(_qtTitle, &QQuickWindow::sceneGraphError, _qtTitle, [self](QQuickWindow::SceneGraphError, const QString&) {
+        _qtTitleFailed = YES;
+    }, Qt::QueuedConnection);
+}
+
+- (void)hideQtTitleBar
+{
+    if (!_qtTitle) return;
+    qtTitleVisible = false;
+    _qtTitleProbe.invalidate();
+    [self restoreVideoFocus];
+    _qtTitle->hide();
+}
+
+- (void)destroyQtTitleBar
+{
+    if (!_qtTitle) return;
+    qtTitleVisible = false;
+    _qtTitleHost.quick = nullptr;
+    [_qtTitleHost.quickView removeFromSuperview];
+    _qtTitleHost.quickView = nil;
+    delete _qtTitle;
+    _qtTitle = nullptr;
+    [_qtTitleHost release];
+    _qtTitleHost = nil;
+}
+
+- (void)checkQtTitleBar
+{
+    if (!_qtTitle || !_window.toolbar.visible || [self fullscreenTransitioning] ||
+        !_window.visible || !(_window.occlusionState & NSWindowOcclusionStateVisible)) {
+        _qtTitleProbe.invalidate();
+        return;
+    }
+
+    if (!_qtTitleProbe.isValid()) _qtTitleProbe.start();
+    if (!_qtTitleFailed) {
+        NSView* view = _qtTitleHost.quickView;
+        const NSRect extent = [view convertRect:view.bounds toView:nil];
+        NSView* video = _window.contentView;
+        const NSRect videoRect = [video convertRect:video.bounds toView:nil];
+        NSButton* zoom = [_window standardWindowButton:NSWindowZoomButton];
+        const CGFloat leftBound = NSMaxX([zoom convertRect:zoom.bounds toView:nil]);
+        const BOOL correctPlacement = view.window == _window && !view.hiddenOrHasHiddenAncestor &&
+            NSWidth(extent) >= 240 && NSHeight(extent) >= GroupHeight &&
+            NSMinX(extent) >= leftBound && NSMinY(extent) >= NSMaxY(videoRect) - 1 &&
+            NSMaxX(extent) <= NSWidth(_window.frame) + 1;
+        if (correctPlacement && _qtTitleHasFrame) {
+            _qtTitleProbe.restart();
+            return;
+        }
+        if (!_qtTitleProbe.hasExpired(1500)) return;
+    }
+
+    qWarning("Aurora's Qt stream titlebar could not present outside the video area. Using the native toolbar.");
+    _qtTitleFailed = YES;
+    [self closeControlCenter];
+    [self closeConnectionDetails];
+    [self hideQtTitleBar];
+    [self destroyQtTitleBar];
+    installSessionToolbar(_window, self);
+}
+
+- (BOOL)routeLocalKey:(const SDL_KeyboardEvent&)key captureActive:(BOOL)captureActive
+{
+    const auto code = static_cast<unsigned>(key.keysym.scancode);
+    if (code >= SDL_NUM_SCANCODES) return NO;
+    const bool stillLocal = _localKeys.test(code);
+    if (key.type == SDL_KEYUP) _localKeys.reset(code);
+    if (stillLocal) return YES;
+    if (!_qtTitle || !_qtTitle->isVisible()) return NO;
+
+    // F6 gives keyboard access to the titlebar from an uncaptured viewer.
+    if (key.type == SDL_KEYDOWN && key.keysym.sym == SDLK_F6 &&
+        !(key.keysym.mod & (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT | KMOD_GUI)) &&
+        !captureActive && _window.keyWindow && [_window makeFirstResponder:_qtTitleHost.quickView]) {
+        sendAction(streamWindowId, AuroraToolbarAction::ReleaseMouse);
+        _qtTitleOwnsKeyboard = YES;
+        _qtTitle->focusControls();
+    }
+    if (!_qtTitleOwnsKeyboard && _window.firstResponder != _qtTitleHost.quickView) return NO;
+    _qtTitleOwnsKeyboard = YES;
+    if (key.type == SDL_KEYDOWN) _localKeys.set(code);
+    return YES;
+}
+
+- (void)restoreVideoFocus
+{
+    if (!_qtTitle || (!_qtTitleOwnsKeyboard && _window.firstResponder != _qtTitleHost.quickView)) return;
+    _qtTitleOwnsKeyboard = NO;
+    _qtTitle->clearKeyboardFocus();
+    if (_window.firstResponder == _qtTitleHost.quickView) [_window makeFirstResponder:_window.contentView];
+}
+
 - (void)resizeItems
 {
+    if (_qtTitle) {
+        // Reserve AppKit's leading window controls and item margins. The actual
+        // slot is measured again after it has been laid out by NSToolbar.
+        NSButton* zoom = [_window standardWindowButton:NSWindowZoomButton];
+        const CGFloat trafficRight = NSMaxX([zoom convertRect:zoom.bounds toView:nil]);
+        const CGFloat width = std::max<CGFloat>(240, std::floor(NSWidth(_window.frame) - trafficRight - 32));
+        _qtTitle->rootObject()->setProperty("layoutWidth", qRound(NSWidth(_window.frame)));
+        [_qtTitleHost resizeToWidth:width];
+        _qtTitle->resize(qRound(width), GroupHeight);
+        return;
+    }
     NSButton* zoom = [_window standardWindowButton:NSWindowZoomButton];
     const auto trafficEdge = zoom ? NSMaxX([zoom convertRect:zoom.bounds toView:nil]) : 0;
     const auto layout = auroraSessionToolbarLayout(
@@ -919,7 +1120,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 
 - (void)positionDisplayTab:(NSNotification*)notification
 {
-    if ([self fullscreenTransitioning] || _nativeFullscreen ||
+    if (_qtTitle || [self fullscreenTransitioning] || _nativeFullscreen ||
         (_window.styleMask & NSWindowStyleMaskFullScreen) || !_window.toolbar.visible ||
         _context.window != _window || _context.hiddenOrHasHiddenAncestor ||
         !NSContainsRect(_context.visibleRect, _displaySlot)) {
@@ -979,6 +1180,11 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     if (![self fullscreenTransitioning] && !_nativeFullscreen && !(_window.styleMask & NSWindowStyleMaskFullScreen)) {
         if (!_window.toolbar.visible) _window.toolbar.visible = YES;
         [self resizeItems];
+        if (_qtTitle && !_qtTitle->isVisible()) {
+            _qtTitleHasFrame = NO;
+            _qtTitle->show();
+            qtTitleVisible = true;
+        }
     }
 }
 
@@ -1049,6 +1255,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     [self closeControlCenter];
     [self closeConnectionDetails];
     [self showFullscreenControls:NO];
+    [self hideQtTitleBar];
     _display.hidden = YES;
 }
 
@@ -1103,6 +1310,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     const NSSize aspect = _nativeFullscreen ? NSZeroSize : _videoAspect;
     if (!NSEqualSizes(_window.contentAspectRatio, aspect)) _window.contentAspectRatio = aspect;
     if (_nativeFullscreen) {
+        [self hideQtTitleBar];
         if (_window.toolbar.visible) _window.toolbar.visible = NO;
         [self showFullscreenControls:YES];
     } else {
@@ -1113,7 +1321,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 
 - (NSArray<NSToolbarItemIdentifier>*)toolbarAllowedItemIdentifiers:(NSToolbar*)toolbar
 {
-    return @[ContextItem, NSToolbarFlexibleSpaceItemIdentifier, ActionsItem];
+    return _qtTitle ? @[QtTitleItem] : @[ContextItem, NSToolbarFlexibleSpaceItemIdentifier, ActionsItem];
 }
 
 - (NSArray<NSToolbarItemIdentifier>*)toolbarDefaultItemIdentifiers:(NSToolbar*)toolbar
@@ -1124,6 +1332,14 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 - (NSToolbarItem*)toolbar:(NSToolbar*)toolbar itemForItemIdentifier:(NSToolbarItemIdentifier)identifier
           willBeInsertedIntoToolbar:(BOOL)willInsert
 {
+    if (_qtTitle && [identifier isEqualToString:QtTitleItem]) {
+        auto* item = [[[NSToolbarItem alloc] initWithItemIdentifier:identifier] autorelease];
+        item.label = @"串流";
+        item.view = _qtTitleHost;
+        item.autovalidates = NO;
+        item.visibilityPriority = NSToolbarItemVisibilityPriorityHigh;
+        return item;
+    }
     const BOOL isContext = [identifier isEqualToString:ContextItem];
     if (!isContext && ![identifier isEqualToString:ActionsItem]) return nil;
     NSToolbarItem* item = [[[NSToolbarItem alloc] initWithItemIdentifier:identifier] autorelease];
@@ -1136,6 +1352,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 
 - (void)updateConnectionQuality:(BOOL)poor
 {
+    if (_qtTitle) _qtTitle->rootObject()->setProperty("networkPoor", poor == YES);
     _dot->poor = poor;
     _dot.needsDisplay = YES;
     NSString* text = poor ? @"网络较差" : @"已连接";
@@ -1448,11 +1665,18 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     [self showConnectionDetails:sender];
 }
 
+- (NSRect)controlAnchorBounds
+{
+    if (_qtTitle && _controlAnchor == _qtTitleHost.quickView)
+        return cocoaAnchor(_controlAnchor, _qtTitle->controlsRect());
+    return _controlAnchor.bounds;
+}
+
 - (void)positionControlCenter
 {
     if (!_controlAnchor.window) return;
     const NSRect windowFrame = _window.frame;
-    const NSRect button = [_controlAnchor.window convertRectToScreen:[_controlAnchor convertRect:_controlAnchor.bounds toView:nil]];
+    const NSRect button = [_controlAnchor.window convertRectToScreen:[_controlAnchor convertRect:[self controlAnchorBounds] toView:nil]];
     const NSRect screen = (_window.screen ?: NSScreen.mainScreen).visibleFrame;
     const NSSize size = _controlCenter.frame.size;
     const CGFloat right = NSWidth(windowFrame) < 530 ? NSMaxX(windowFrame) - 8 : NSMaxX(button);
@@ -1475,7 +1699,11 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
         _qtControls->hide();
     }
     [_controlCenter orderOut:nil];
-    [_controlAnchor markMenuOpen:NO];
+    if (_qtTitle && _controlAnchor == _qtTitleHost.quickView) {
+        _qtTitle->setSelectedPanel({});
+    } else {
+        [(AuroraToolbarButton*)_controlAnchor markMenuOpen:NO];
+    }
     _controlAnchor = nil;
 }
 
@@ -1486,14 +1714,19 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 
 - (void)showControls:(AuroraToolbarButton*)sender
 {
-    if ([self fullscreenTransitioning]) return;
+    [self openControlsFrom:sender keyboard:isKeyboardInput(NSApp.currentEvent)];
+}
+
+- (void)openControlsFrom:(NSView*)source keyboard:(BOOL)keyboard
+{
+    if (!source.window || [self fullscreenTransitioning]) return;
     if (_controlCenter.visible) {
         [self closeControlCenter];
         return;
     }
     [self closeConnectionDetails];
     sendAction(streamWindowId, AuroraToolbarAction::ReleaseMouse);
-    _controlAnchor = sender;
+    _controlAnchor = source;
     _controlPage = 0;
     if (!_controlCenter) {
         _controlCenter = [[AuroraControlPanel alloc] initWithContentRect:NSMakeRect(0, 0, 288, 193)
@@ -1514,10 +1747,14 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
         frame.layer.cornerRadius = 9;
         frame.layer.masksToBounds = YES;
     }
-    _controlCenter.keyboardNavigation = isKeyboardInput(NSApp.currentEvent);
+    _controlCenter.keyboardNavigation = keyboard;
     [self renderControlCenter];
     [self positionControlCenter];
-    [sender markMenuOpen:YES];
+    if (_qtTitle && source == _qtTitleHost.quickView) {
+        _qtTitle->setSelectedPanel(QStringLiteral("controls"));
+    } else {
+        [(AuroraToolbarButton*)source markMenuOpen:YES];
+    }
     [_window addChildWindow:_controlCenter ordered:NSWindowAbove];
     [_controlCenter makeKeyAndOrderFront:nil];
     [_controlCenter makeFirstResponder:_controlCenter.initialFirstResponder];
@@ -1527,9 +1764,10 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
         NSEventMaskKeyDown | NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown handler:^NSEvent*(NSEvent* event) {
         if (event.type != NSEventTypeKeyDown) {
             if (event.window == controller->_controlCenter) return event;
-            AuroraToolbarButton* trigger = controller->_controlAnchor;
+            NSView* trigger = controller->_controlAnchor;
             if (event.window == trigger.window &&
-                NSPointInRect([trigger convertPoint:event.locationInWindow fromView:nil], trigger.bounds)) return event;
+                NSPointInRect([trigger convertPoint:event.locationInWindow fromView:nil],
+                              [controller controlAnchorBounds])) return event;
             [controller closeControlCenter];
             return event;
         }
@@ -1538,7 +1776,12 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
             auto* anchorButton = controller->_controlAnchor;
             [controller closeControlCenter];
             [controller->_window makeKeyWindow];
-            if ([anchorButton.window makeFirstResponder:anchorButton]) [anchorButton showKeyboardFocus:YES];
+            if ([anchorButton.window makeFirstResponder:anchorButton]) {
+                if (controller->_qtTitle && anchorButton == controller->_qtTitleHost.quickView)
+                    controller->_qtTitle->focusControls();
+                else
+                    [(AuroraToolbarButton*)anchorButton showKeyboardFocus:YES];
+            }
         } else {
             controller->_controlCenter.keyboardNavigation = YES;
             controller->_controlPage = 0;
@@ -1675,14 +1918,19 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 
 - (void)showConnectionDetails:(id)sender
 {
+    NSView* anchor = sender == _status ? _status : _floatingPanel.contentView;
+    [self showDetailsFrom:anchor bounds:anchor.bounds];
+}
+
+- (void)showDetailsFrom:(NSView*)anchor bounds:(NSRect)bounds
+{
     [self closeControlCenter];
     if (_connectionDetails.shown) {
         [self closeConnectionDetails];
         return;
     }
 
-    NSView* anchor = sender == _status ? _status : _floatingPanel.contentView;
-    if (!anchor.window) return;
+    if (!anchor.window || NSIsEmptyRect(bounds)) return;
     if (!_connectionDetails) {
         _connectionDetails = [[NSPopover alloc] init];
         _connectionDetails.delegate = self;
@@ -1695,8 +1943,11 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     }
 
     [self refreshConnectionDetails:nil];
-    [_connectionDetails showRelativeToRect:anchor.bounds ofView:anchor preferredEdge:NSRectEdgeMinY];
+    [_connectionDetails showRelativeToRect:bounds ofView:anchor
+                              preferredEdge:NSRectEdgeMinY];
     if (_connectionDetails.shown) {
+        if (_qtTitle && anchor == _qtTitleHost)
+            _qtTitle->setSelectedPanel(QStringLiteral("connection"));
         _connectionRefresh = [[NSTimer timerWithTimeInterval:1 target:self
             selector:@selector(refreshConnectionDetails:) userInfo:nil repeats:YES] retain];
         [NSRunLoop.mainRunLoop addTimer:_connectionRefresh forMode:NSRunLoopCommonModes];
@@ -1753,6 +2004,8 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 
 - (void)popoverDidClose:(NSNotification*)notification
 {
+    if (_qtTitle && _qtTitle->rootObject()->property("panelKind").toString() == QStringLiteral("connection"))
+        _qtTitle->setSelectedPanel({});
     [_connectionRefresh invalidate];
     [_connectionRefresh release];
     _connectionRefresh = nil;
@@ -1826,6 +2079,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 {
     [NSNotificationCenter.defaultCenter removeObserver:self];
     [self closeControlCenter];
+    [self destroyQtTitleBar];
     if (_qtControls) {
         auto* view = reinterpret_cast<NSView*>(_qtControls->winId());
         [view removeFromSuperview];
@@ -1856,6 +2110,8 @@ static void installSessionToolbar(NSWindow* native, AuroraSessionToolbarControll
     native.backgroundColor = rgb(0xedf1f8);
     native.titlebarAppearsTransparent = YES;
 
+    [controller prepareQtTitleBar];
+    [controller resizeItems];
     auto* toolbar = [[NSToolbar alloc] initWithIdentifier:@"AuroraStreamUnifiedToolbar"];
     toolbar.displayMode = NSToolbarDisplayModeIconOnly;
     toolbar.allowsUserCustomization = NO;
@@ -1872,7 +2128,7 @@ static void installSessionToolbar(NSWindow* native, AuroraSessionToolbarControll
         minimum.width = 400;
         native.contentMinSize = minimum;
     }
-    [controller resizeItems];
+    [controller showIfWindowed];
 }
 
 void installAuroraConnectionToolbar(NSWindow* window, NSString* deviceName, id cancelTarget, SEL cancelAction)
@@ -1936,9 +2192,26 @@ bool installAuroraSessionToolbar(SDL_Window* window, const QString& deviceName, 
     return true;
 }
 
-bool auroraQtControlsVisible()
+bool serviceAuroraQtChrome(SDL_Window* window)
 {
-    return qtControlsVisible;
+    if (!qtTitleVisible && !qtControlsVisible) return false;
+    // Cocoa's common run-loop sources flush QPA/Quick without taking native
+    // NSEvents away from SDL_WaitEventTimeout's Cocoa dispatcher.
+    @autoreleasepool {
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, true);
+        if (qtTitleVisible) [auroraToolbar(nativeWindow(window)) checkQtTitleBar];
+    }
+    return qtTitleVisible || qtControlsVisible;
+}
+
+bool auroraRouteLocalSessionKey(SDL_Window* window, const SDL_KeyboardEvent& key, bool captureActive)
+{
+    return [auroraToolbar(nativeWindow(window)) routeLocalKey:key captureActive:captureActive];
+}
+
+void auroraRestoreSessionVideoFocus(SDL_Window* window)
+{
+    [auroraToolbar(nativeWindow(window)) restoreVideoFocus];
 }
 
 bool auroraSessionToolbarTransitioning(SDL_Window* window)
@@ -1965,6 +2238,8 @@ void closeAuroraFullscreenControls(SDL_Window* window)
 {
     auto* controller = auroraToolbar(nativeWindow(window));
     [controller closeConnectionDetails];
+    [controller closeControlCenter];
+    [controller hideQtTitleBar];
     [controller showFullscreenControls:NO];
 }
 
