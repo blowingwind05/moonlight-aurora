@@ -797,7 +797,9 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     [_context addSubview:_status];
     _statusChevron = [[[NSImageView alloc] initWithFrame:NSZeroRect] autorelease];
     _statusChevron.image = [[NSImage imageWithSystemSymbolName:@"chevron.down" accessibilityDescription:nil]
-        imageWithSymbolConfiguration:[NSImageSymbolConfiguration configurationWithPointSize:8 weight:NSFontWeightRegular]];
+        imageWithSymbolConfiguration:[NSImageSymbolConfiguration configurationWithPointSize:11 weight:NSFontWeightMedium]];
+    _statusChevron.imageScaling = NSImageScaleProportionallyDown;
+    _statusChevron.contentTintColor = rgb(0x526176);
     [_statusChevron setAccessibilityElement:NO];
     [_status addSubview:_statusChevron];
     _dot = [[[AuroraStatusDot alloc] initWithFrame:NSZeroRect] autorelease];
@@ -880,7 +882,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     _device.frame = NSMakeRect(0, std::floor(middle - deviceHeight / 2), layout.device, deviceHeight);
     _status.frame = NSMakeRect(layout.device + 8, middle - 14, layout.status, 28);
     const BOOL compactStatus = layout.status == 25;
-    const BOOL arrow = !_connectionWindow;
+    const BOOL arrow = !_connectionWindow && !compactStatus;
     _statusText.hidden = compactStatus;
     _statusChevron.hidden = !arrow;
     const CGFloat dot = _dot->connecting ? 9 : 6;
@@ -889,10 +891,9 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     const CGFloat textX = NSMaxX(_dot.frame) + 6;
     const CGFloat textHeight = std::ceil(_statusText.intrinsicContentSize.height);
     const CGFloat textWidth = std::min(captionWidth(_statusText),
-        std::max<CGFloat>(0, layout.status - textX - (arrow ? 15 : 0)));
+        std::max<CGFloat>(0, layout.status - textX - (arrow ? 19 : 0)));
     _statusText.frame = NSMakeRect(textX, std::floor(14 - textHeight / 2), textWidth, textHeight);
-    const CGFloat arrowX = compactStatus ? layout.status - 10 : NSMaxX(_statusText.frame) + 5;
-    _statusChevron.frame = NSMakeRect(arrowX, 8, 9, 12);
+    _statusChevron.frame = NSMakeRect(NSMaxX(_statusText.frame) + 5, 7, 14, 14);
 
     [_display showLabel:layout.display > 32];
     _displaySlot = NSMakeRect(NSMaxX(_status.frame) + 6, 0,
