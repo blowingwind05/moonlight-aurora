@@ -870,7 +870,8 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
          static_cast<int>(captionWidth(_statusText)) + 32,
          static_cast<int>(std::ceil([_display preferredWidth])),
          static_cast<int>(std::ceil([_controls preferredWidth])),
-         static_cast<int>(std::ceil([_disconnect preferredWidth]))}, _brand != nil);
+         static_cast<int>(std::ceil([_disconnect preferredWidth]))}, _brand != nil,
+        _connectionWindow && !_disconnect.hidden);
     [_context resizeToWidth:layout.contextWidth()];
     [_actions resizeToWidth:layout.actionsWidth()];
 
@@ -900,10 +901,12 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 
     [_controls showLabel:layout.controls > 32];
     [_disconnect showLabel:layout.disconnect > 32];
-    _controls.frame = NSMakeRect(0, middle - ButtonHeight / 2, layout.controls, ButtonHeight);
-    _disconnect.frame = NSMakeRect(layout.controls + 4, middle - ButtonHeight / 2, layout.disconnect, ButtonHeight);
+    _disconnect.hidden = layout.disconnect == 0;
+    _disconnect.frame = NSMakeRect(0, middle - ButtonHeight / 2, layout.disconnect, ButtonHeight);
+    const CGFloat controlsX = layout.disconnect ? layout.disconnect + 4 : 0;
+    _controls.frame = NSMakeRect(controlsX, middle - ButtonHeight / 2, layout.controls, ButtonHeight);
     _brand.hidden = !layout.brand;
-    _brand.frame = NSMakeRect(NSMaxX(_disconnect.frame) + 8, middle - BrandSize / 2,
+    _brand.frame = NSMakeRect(NSMaxX(_controls.frame) + 8, middle - BrandSize / 2,
                               BrandSize, BrandSize);
 }
 
@@ -1414,6 +1417,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 
 - (void)showControls:(AuroraToolbarButton*)sender
 {
+    if ([self fullscreenTransitioning]) return;
     if (_controlCenter.visible) {
         [self closeControlCenter];
         return;

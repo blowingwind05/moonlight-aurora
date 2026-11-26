@@ -13,7 +13,7 @@ struct AuroraSessionToolbarLayout {
     bool brand;
 
     int contextWidth() const { return device + status + display + 2 * DisplayFoot + 14; }
-    int actionsWidth() const { return controls + disconnect + 4 + (brand ? 36 : 0); }
+    int actionsWidth() const { return controls + (disconnect ? disconnect + 4 : 0) + (brand ? 36 : 0); }
 };
 
 struct AuroraSessionToolbarWidths {
@@ -25,14 +25,14 @@ struct AuroraSessionToolbarWidths {
 };
 
 inline AuroraSessionToolbarLayout auroraSessionToolbarLayout(
-        int width, int trafficRight, AuroraSessionToolbarWidths measured, bool brandAvailable)
+        int width, int trafficRight, AuroraSessionToolbarWidths measured, bool brandAvailable, bool showCancel)
 {
     const bool compact = width < 760;
     AuroraSessionToolbarLayout layout{
         0, width < 490 ? 25 : std::max(94, measured.status),
         compact ? 32 : std::max(152, measured.display),
         compact ? 32 : std::max(94, measured.controls),
-        width < 490 ? 32 : std::max(58, measured.disconnect), brandAvailable};
+        showCancel ? (width < 490 ? 32 : std::max(58, measured.disconnect)) : 0, brandAvailable};
 
     // Leave breathing room for the native traffic lights and toolbar margins.
     const int content = width - std::max(78, trafficRight) - 40;
