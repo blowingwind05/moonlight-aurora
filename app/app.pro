@@ -397,7 +397,7 @@ macx {
         SOURCES += cli/aurora-mac-stream.mm \
                    streaming/aurora-session-toolbar.mm streaming/aurora-session-privacy.cpp
         HEADERS += qt-session/AuroraConnectionView.h qt-session/AuroraMacControlsView.h \
-                   qt-session/AuroraMacTitleBarView.h
+                   qt-session/AuroraMacTitleBarView.h qt-session/AuroraMacPrivacyAppearanceView.h
         RESOURCES += qt-session/connection-stage.qrc
         HEADERS += streaming/aurora-session-toolbar.h streaming/aurora-session-privacy.h \
                    streaming/aurora-session-toolbar-layout.h

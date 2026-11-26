@@ -1,5 +1,8 @@
 #include "nvcomputer.h"
 #ifdef AURORA_STREAM_RUNTIME
+#include "../qt-session/AuroraPrivacyArtwork.h"
+#endif
+#ifdef AURORA_STREAM_RUNTIME
 #include "../AuroraStreamEntry.h"
 #include "aurora-bitrate.h"
 #endif
@@ -527,6 +530,56 @@ QByteArray NvHTTP::sendAuroraPrivacy(const QString& action, const QSslConfigurat
 }
 
 #ifdef AURORA_STREAM_RUNTIME
+QByteArray NvHTTP::sendAuroraDisplayControl(const QString& action, const QString& id,
+                                          const QSslConfiguration& clientIdentity)
+{
+    constexpr qint64 maxResponse = 8192;
+    bool notFound = false;
+    const auto query = QStringLiteral("operation=") + action +
+        (id.isEmpty() ? QString() : QStringLiteral("&id=") + id);
+    QScopedPointer<QNetworkReply> reply(openAuroraPairedPost(QStringLiteral("aurora-session-displays"),
+        query, clientIdentity, maxResponse, &notFound));
+    if (notFound)
+        return QByteArrayLiteral("unsupported");
+    const auto body = reply->read(maxResponse + 1);
+    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    if ((status != 200 && status != 202) || body.isEmpty() || body.size() > maxResponse || body.contains('\0')) {
+        throw GfeHttpResponseException(400, "Invalid Aurora display control response");
+    }
+    return body;
+}
+
+QByteArray NvHTTP::sendAuroraPrivacyAppearance(const QString& action, const QByteArray& png,
+                                              const QSslConfiguration& clientIdentity)
+{
+    const bool read = action == "read";
+    const bool save = action == "save";
+    if ((!read && !save && action != "reset") || !m_ExactEndpoint ||
+            m_ServerCert.isNull() || m_BaseUrlHttps.scheme() != "https" ||
+            (save ? (png.isEmpty() || png.size() > AuroraPrivacyArtwork::MaxEncodedBytes) : !png.isEmpty())) {
+        throw GfeHttpResponseException(400, "Invalid Aurora privacy appearance request");
+    }
+
+    bool notFound = false;
+    const qint64 limit = read ? AuroraPrivacyArtwork::MaxEncodedBytes : AURORA_PAIRED_RESPONSE_LIMIT;
+    QScopedPointer<QNetworkReply> reply(openConnection(m_BaseUrlHttps, "aurora-privacy-appearance",
+        read ? QString() : "action=" + action, 10000, NVLL_NONE, limit, &clientIdentity, &notFound, png, read));
+    if (notFound) {
+        return QByteArrayLiteral("unsupported");
+    }
+    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    if (status == 204 && reply->bytesAvailable() == 0) {
+        return read ? QByteArrayLiteral("default") : QByteArrayLiteral("saved");
+    }
+    if (read && status == 200 && reply->header(QNetworkRequest::ContentTypeHeader).toString() == "image/png") {
+        const auto image = reply->read(limit + 1);
+        if (image.size() <= limit && image.startsWith(QByteArray::fromHex("89504e470d0a1a0a"))) {
+            return QByteArrayLiteral("image=") + image.toBase64();
+        }
+    }
+    throw GfeHttpResponseException(400, "Invalid Aurora privacy appearance response");
+}
+
 QByteArray NvHTTP::sendAuroraBitrate(const AuroraBitrate::Request& request,
                                     const QSslConfiguration& clientIdentity)
 {
@@ -635,7 +688,9 @@ NvHTTP::openConnection(QUrl baseUrl,
                        NvLogLevel logLevel,
                        qint64 maxBytes,
                        const QSslConfiguration* pinnedPostIdentity,
-                       bool* pairedNotFound)
+                       bool* pairedNotFound,
+                       const QByteArray& postData,
+                       bool pairedGet)
 {
     // Port must be set
     Q_ASSERT(baseUrl.port(0) != 0);
@@ -685,7 +740,10 @@ NvHTTP::openConnection(QUrl baseUrl,
         sslConfig.setSslOption(QSsl::SslOptionDisableSessionTickets, true);
         sslConfig.setSslOption(QSsl::SslOptionDisableSessionSharing, true);
         request.setSslConfiguration(sslConfig);
-        request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
+        if (!pairedGet) {
+            request.setHeader(QNetworkRequest::ContentTypeHeader,
+                              postData.isEmpty() ? "application/x-www-form-urlencoded" : "image/png");
+        }
         m_Nam.clearConnectionCache();
     } else {
         request.setSslConfiguration(IdentityManager::get()->getSslConfig());
@@ -704,7 +762,7 @@ NvHTTP::openConnection(QUrl baseUrl,
     QT_WARNING_POP
 #endif
 
-    QNetworkReply* reply = pinnedPostIdentity ? m_Nam.post(request, QByteArray()) : m_Nam.get(request);
+    QNetworkReply* reply = pinnedPostIdentity && !pairedGet ? m_Nam.post(request, postData) : m_Nam.get(request);
     if (pinnedPostIdentity) {
         reply->setReadBufferSize(maxBytes + 1);
         connect(reply, &QNetworkReply::encrypted, reply, [this, reply, handshakeSeen = false]() mutable {

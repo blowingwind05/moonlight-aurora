@@ -5,8 +5,15 @@
 #include "aurora-session-privacy.h"
 #include "../backend/aurora-bitrate.h"
 #include "../qt-session/AuroraMacControlsView.h"
+#include "../qt-session/AuroraMacPrivacyAppearanceView.h"
+#include "../qt-session/AuroraPrivacyArtwork.h"
 #include "../qt-session/AuroraMacTitleBarView.h"
+#include "../qt-session/AuroraDisplayControls.h"
+#include <QCryptographicHash>
 #include <QElapsedTimer>
+#include <QFileInfo>
+#include <QRegularExpression>
+#include <QTemporaryDir>
 #include <bitset>
 
 #import <AppKit/AppKit.h>
@@ -34,6 +41,21 @@ namespace {
     NSString* const ActionsItem = @"AuroraSessionActions";
     NSString* const QtTitleItem = @"AuroraQtSessionTitle";
     bool qtTitleVisible = false;
+    bool qtAppearanceVisible = false;
+
+    // Shared by the Cocoa owner and in-flight workers. The directory survives
+    // until a canceled decoder or helper has finished with its files.
+    struct AppearanceEdit {
+        QTemporaryDir files;
+        std::atomic<bool> live{true};
+    };
+
+    bool writeAppearanceImage(const QString& path, const QByteArray& png)
+    {
+        QFile file(path);
+        return !png.isEmpty() && file.open(QIODevice::WriteOnly | QIODevice::NewOnly) &&
+               file.write(png) == png.size() && file.flush();
+    }
 
     NSRect cocoaAnchor(NSView* view, const QRectF& rect)
     {
@@ -756,9 +778,15 @@ namespace {
     NSImageView* _brand;
     AuroraControlPanel* _controlCenter;
     AuroraMacControlsView* _qtControls;
+    AuroraMacPrivacyAppearanceView* _appearanceEditor;
+    NSOpenPanel* _appearancePicker;
+    std::shared_ptr<AppearanceEdit> _appearanceEdit;
+    std::bitset<256> _appearanceMouseButtons;
     NSView* _controlAnchor;
     AuroraMacTitleBarView* _qtTitle;
     AuroraQtTitleHost* _qtTitleHost;
+    QVariantMap _displayState;
+    BOOL _checkedDisplays;
     QElapsedTimer _qtTitleProbe;
     BOOL _qtTitleFailed;
     BOOL _qtTitleHasFrame;
@@ -808,7 +836,19 @@ namespace {
 - (void)finishBitrateRequest:(const AuroraBitrate::Request&)request reply:(const QByteArray&)reply;
 - (void)closeControlCenter;
 - (void)positionControlCenter;
+- (void)openPrivacyAppearance:(id)sender;
+- (void)endPrivacyAppearance;
+- (void)pickPrivacyAppearance:(int)request;
+- (void)submitPrivacyAppearance:(int)request style:(const QVariantMap&)style;
+- (void)runPrivacyAppearance:(AuroraPrivacyAppearanceAction)action request:(int)request file:(const QString&)file;
+- (BOOL)routePrivacyEditorMouseButton:(const SDL_MouseButtonEvent&)button;
 - (void)prepareQtTitleBar;
+- (void)checkDisplays;
+- (void)requestDisplay:(const QString&)operation id:(const QString&)id;
+- (void)showDisplaysFrom:(const QRectF&)rect;
+- (void)selectDisplayFromMenu:(NSMenuItem*)sender;
+- (void)removeDisplayFromMenu:(NSMenuItem*)sender;
+- (void)createDisplayFromMenu:(NSMenuItem*)sender;
 - (NSWindowToolbarStyle)sessionToolbarStyle;
 - (void)checkQtTitleBar;
 - (void)hideQtTitleBar;
@@ -962,6 +1002,12 @@ static void installSessionToolbar(NSWindow* native, AuroraSessionToolbarControll
         [self showDetailsFrom:_qtTitleHost
                       bounds:[view convertRect:cocoaAnchor(view, anchor) toView:_qtTitleHost]];
     };
+    _qtTitle->onDisplayAction = [self](const QString& operation, const QString& id) {
+        [self requestDisplay:operation id:id];
+    };
+    _qtTitle->onDisplays = [self](const QRectF& rect) { [self showDisplaysFrom:rect]; };
+    _qtTitle->rootObject()->setProperty("displaySnapshot", _displayState);
+    _checkedDisplays = NO;
     QObject::connect(_qtTitle, &QQuickWindow::frameSwapped, _qtTitle, [self] {
         _qtTitleHasFrame = YES;
     }, Qt::QueuedConnection);
@@ -1040,6 +1086,10 @@ static void installSessionToolbar(NSWindow* native, AuroraSessionToolbarControll
     const bool stillLocal = _localKeys.test(code);
     if (key.type == SDL_KEYUP) _localKeys.reset(code);
     if (stillLocal) return YES;
+    if (_appearanceEditor) {
+        if (key.type == SDL_KEYDOWN) _localKeys.set(code);
+        return YES;
+    }
     if (!_qtTitle || !_qtTitle->isVisible()) return NO;
 
     // F6 gives keyboard access to the titlebar from an uncaptured viewer.
@@ -1054,6 +1104,14 @@ static void installSessionToolbar(NSWindow* native, AuroraSessionToolbarControll
     _qtTitleOwnsKeyboard = YES;
     if (key.type == SDL_KEYDOWN) _localKeys.set(code);
     return YES;
+}
+
+- (BOOL)routePrivacyEditorMouseButton:(const SDL_MouseButtonEvent&)button
+{
+    const bool local = _appearanceMouseButtons.test(button.button);
+    if (button.state == SDL_RELEASED) _appearanceMouseButtons.reset(button.button);
+    else if (_appearanceEditor) _appearanceMouseButtons.set(button.button);
+    return local || _appearanceEditor != nullptr;
 }
 
 - (void)restoreVideoFocus
@@ -1236,7 +1294,8 @@ static void installSessionToolbar(NSWindow* native, AuroraSessionToolbarControll
 {
     if ([self fullscreenTransitioning]) return;
     if (_floatingPanel.parentWindow == _window) [self positionFullscreenControls];
-    if (_controlCenter.visible) [self closeControlCenter];
+    if (_appearanceEditor) [self positionControlCenter];
+    else if (_controlCenter.visible) [self closeControlCenter];
     if (!_nativeFullscreen && !(_window.styleMask & NSWindowStyleMaskFullScreen)) {
         [self resizeItems];
     }
@@ -1433,7 +1492,7 @@ static void installSessionToolbar(NSWindow* native, AuroraSessionToolbarControll
 
 - (void)renderControlCenter
 {
-    if (!_controlCenter) return;
+    if (!_controlCenter || _appearanceEditor) return;
     constexpr CGFloat width = 288;
     NSView* root = _controlCenter.contentView;
     _bitrateLabel = nil;
@@ -1611,6 +1670,14 @@ static void installSessionToolbar(NSWindow* native, AuroraSessionToolbarControll
                 label(@"无法确认隐私保护", YES);
                 row(@"重新检查", @"shield", @selector(refreshPrivacy:), 0);
             }
+            if (auroraMacSessionChromeEnabled()) {
+                auto* appearance = [self controlRow:@"设置隐私屏保" symbol:@"photo" y:y
+                    action:@selector(openPrivacyAppearance:) tag:0 next:YES];
+                appearance.identifier = @"auroraPrivacyAppearance";
+                appearance.enabled = hasTarget && !busy && state != AuroraPrivacyState::Unsupported;
+                [body addSubview:appearance];
+                y += 34;
+            }
             break;
         }
         }
@@ -1680,6 +1747,18 @@ static void installSessionToolbar(NSWindow* native, AuroraSessionToolbarControll
 
 - (void)positionControlCenter
 {
+    if (_appearanceEditor) {
+        NSView* content = _window.contentView;
+        const NSRect playback = [_window convertRectToScreen:[content convertRect:content.bounds toView:nil]];
+        NSScreen* screen = _window.screen ?: NSScreen.mainScreen;
+        const NSRect usable = NSIntersectionRect(playback, _nativeFullscreen ? screen.frame : screen.visibleFrame);
+        const CGFloat width = std::clamp(NSWidth(usable) - 24, CGFloat(1), CGFloat(686));
+        const CGFloat height = std::clamp(NSHeight(usable) - 24, CGFloat(1), CGFloat(520));
+        [_controlCenter setContentSize:NSMakeSize(width, height)];
+        [_controlCenter setFrameOrigin:NSMakePoint(NSMidX(usable) - width / 2, NSMidY(usable) - height / 2)];
+        _appearanceEditor->resize(qRound(width), qRound(height));
+        return;
+    }
     if (!_controlAnchor.window) return;
     const NSRect windowFrame = _window.frame;
     const NSRect button = [_controlAnchor.window convertRectToScreen:[_controlAnchor convertRect:[self controlAnchorBounds] toView:nil]];
@@ -1695,6 +1774,7 @@ static void installSessionToolbar(NSWindow* native, AuroraSessionToolbarControll
 
 - (void)closeControlCenter
 {
+    [self endPrivacyAppearance];
     if (_controlMonitor) [NSEvent removeMonitor:_controlMonitor];
     _controlMonitor = nil;
     if (_controlCenter.parentWindow == _window) [_window removeChildWindow:_controlCenter];
@@ -1768,6 +1848,10 @@ static void installSessionToolbar(NSWindow* native, AuroraSessionToolbarControll
     __block AuroraSessionToolbarController* controller = self;
     _controlMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:
         NSEventMaskKeyDown | NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown handler:^NSEvent*(NSEvent* event) {
+        if (controller->_appearanceEditor) {
+            if (event.window == controller->_window || event.window == controller->_floatingPanel) return nil;
+            return event;
+        }
         if (event.type != NSEventTypeKeyDown) {
             if (event.window == controller->_controlCenter) return event;
             NSView* trigger = controller->_controlAnchor;
@@ -1795,6 +1879,217 @@ static void installSessionToolbar(NSWindow* native, AuroraSessionToolbarControll
         }
         return nil;
     }];
+}
+
+- (void)openPrivacyAppearance:(id)sender
+{
+    if (_appearanceEditor || !_controlCenter.visible || [self fullscreenTransitioning] ||
+        !privacy || !privacy->live || privacy->target.program.isEmpty()) return;
+
+    auto editor = std::make_unique<AuroraMacPrivacyAppearanceView>(
+        auroraMacSessionQml(QStringLiteral("MacPrivacyScreensaverEditor.qml")));
+    if (editor->status() != QQuickView::Ready || !editor->rootObject()) {
+        qWarning("Aurora could not load the privacy screensaver editor.");
+        return;
+    }
+    NSView* view = reinterpret_cast<NSView*>(editor->winId());
+    if (!view) return;
+
+    _appearanceEdit = std::make_shared<AppearanceEdit>();
+    _appearanceEditor = editor.release();
+    _appearanceEditor->onClose = [self] {
+        [self endPrivacyAppearance];
+        [self renderControlCenter];
+    };
+    _appearanceEditor->onImport = [self](int request) { [self pickPrivacyAppearance:request]; };
+    _appearanceEditor->onSave = [self](int request, const QVariantMap& style) {
+        [self submitPrivacyAppearance:request style:style];
+    };
+
+    sendAction(streamWindowId, AuroraToolbarAction::ReleaseMouse);
+    NSView* root = _controlCenter.contentView;
+    [_controlCenter makeFirstResponder:nil];
+    _controlCenter.initialFirstResponder = nil;
+    if (_qtControls) _qtControls->hide();
+    qtControlsVisible = false;
+    root.subviews = @[];
+    root.layer.cornerRadius = 13;
+    view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [root addSubview:view];
+    [self positionControlCenter];
+    view.frame = root.bounds;
+    _appearanceEditor->show();
+    qtAppearanceVisible = true;
+    [_controlCenter makeFirstResponder:view];
+
+    const bool storage = _appearanceEdit->files.isValid();
+    _appearanceEditor->capability(false, storage ? QStringLiteral("读取被控设备的已保存样式…")
+                                                : QStringLiteral("无法创建本地屏保预览。"));
+    _appearanceEditor->begin(QString::fromNSString(_device.stringValue), AuroraMacPrivacyAppearanceView::defaultStyle());
+    if (storage) [self runPrivacyAppearance:AuroraPrivacyAppearanceAction::Read request:0 file:QString()];
+}
+
+- (void)endPrivacyAppearance
+{
+    if (!_appearanceEditor) return;
+    const auto edit = std::move(_appearanceEdit);
+    edit->live = false;
+    qtAppearanceVisible = false;
+    if (_appearancePicker) {
+        NSOpenPanel* picker = _appearancePicker;
+        _appearancePicker = nil;
+        [picker cancel:nil];
+        [picker orderOut:nil];
+        [picker release];
+    }
+    auto* editor = _appearanceEditor;
+    _appearanceEditor = nullptr;
+    [_controlCenter makeFirstResponder:nil];
+    QObject::disconnect(editor->rootObject(), nullptr, editor, nullptr);
+    editor->end();
+    editor->hide();
+    auto* view = reinterpret_cast<NSView*>(editor->winId());
+    [view removeFromSuperview];
+    editor->deleteLater();
+    _controlCenter.contentView.layer.cornerRadius = 9;
+}
+
+- (void)pickPrivacyAppearance:(int)request
+{
+    if (!_appearanceEditor || _appearancePicker) return;
+    _appearancePicker = [[NSOpenPanel openPanel] retain];
+    _appearancePicker.canChooseDirectories = NO;
+    _appearancePicker.canChooseFiles = YES;
+    _appearancePicker.allowsMultipleSelection = NO;
+    _appearancePicker.allowedFileTypes = @[@"jpg", @"jpeg", @"png", @"webp"];
+
+    const auto edit = _appearanceEdit;
+    const std::weak_ptr<AuroraSessionPrivacy> identity(privacy);
+    const auto windowId = streamWindowId;
+    [_appearancePicker beginSheetModalForWindow:_controlCenter completionHandler:^(NSModalResponse response) {
+        if (!edit->live) return;
+        const auto session = identity.lock();
+        auto* toolbar = auroraToolbar(nativeWindow(SDL_GetWindowFromID(windowId)));
+        if (!session || !session->live || !toolbar || toolbar->privacy != session ||
+            toolbar->_appearanceEdit != edit) return;
+
+        auto* picker = toolbar->_appearancePicker;
+        toolbar->_appearancePicker = nil;
+        NSURL* selected = response == NSModalResponseOK ? picker.URL : nil;
+        const bool local = selected.isFileURL;
+        const auto input = local ? QString::fromNSString(selected.path) : QString();
+        const auto name = local ? QString::fromNSString(selected.lastPathComponent) : QString();
+        [picker release];
+        if (input.isEmpty()) {
+            toolbar->_appearanceEditor->finishImport(request, response == NSModalResponseOK
+                ? QStringLiteral("无法读取所选图片，请重新选择。") : QString());
+            return;
+        }
+
+        const auto id = QStringLiteral("mac-import-%1").arg(request);
+        const auto file = edit->files.filePath(id + QStringLiteral(".png"));
+        QThreadPool::globalInstance()->start([edit, identity, windowId, request, input, name, id, file] {
+            const auto session = identity.lock();
+            if (!session || !session->live || !edit->live) return;
+            const QFileInfo source(input);
+            const auto png = source.isFile() ? AuroraPrivacyArtwork::prepare(input) : QByteArray();
+            const bool prepared = edit->live && writeAppearanceImage(file, png);
+            const auto mainLoop = CFRunLoopGetMain();
+            CFRunLoopPerformBlock(mainLoop, kCFRunLoopCommonModes, ^{
+                const auto current = identity.lock();
+                if (!current || !current->live || !edit->live) return;
+                auto* owner = auroraToolbar(nativeWindow(SDL_GetWindowFromID(windowId)));
+                if (!owner || owner->privacy != current || owner->_appearanceEdit != edit) return;
+                if (prepared) {
+                    owner->_appearanceEditor->imported(request, AuroraMacPrivacyAppearanceView::customStyle(id, name, file));
+                } else {
+                    owner->_appearanceEditor->finishImport(request, QStringLiteral("无法预览这张图片，请重新选择。"));
+                }
+            });
+            CFRunLoopWakeUp(mainLoop);
+        });
+    }];
+}
+
+- (void)submitPrivacyAppearance:(int)request style:(const QVariantMap&)style
+{
+    if (!_appearanceEditor || !privacy || !privacy->live) return;
+    const auto kind = style.value(QStringLiteral("kind")).toString();
+    const auto id = style.value(QStringLiteral("id")).toString();
+    if (kind == QStringLiteral("default") && id == QStringLiteral("default")) {
+        [self runPrivacyAppearance:AuroraPrivacyAppearanceAction::Reset request:request file:QString()];
+        return;
+    }
+    QString file;
+    if (kind == QStringLiteral("preset")) {
+        file = _appearanceEditor->presetFile(id);
+    } else if (kind == QStringLiteral("custom")) {
+        static const QRegularExpression imported(QStringLiteral(R"(\Amac-import-[1-9][0-9]{0,9}\z)"));
+        if (imported.match(id).hasMatch()) {
+            const auto candidate = _appearanceEdit->files.filePath(id + QStringLiteral(".png"));
+            if (style.value(QStringLiteral("previewUrl")).toUrl() == QUrl::fromLocalFile(candidate))
+                file = candidate;
+        }
+    }
+    if (file.isEmpty() || !QFileInfo(file).isFile()) {
+        _appearanceEditor->finishSave(request, QStringLiteral("failed"), QStringLiteral("找不到所选图片，请重新选择。"));
+        return;
+    }
+    [self runPrivacyAppearance:AuroraPrivacyAppearanceAction::Save request:request file:file];
+}
+
+- (void)runPrivacyAppearance:(AuroraPrivacyAppearanceAction)action request:(int)request file:(const QString&)file
+{
+    const auto edit = _appearanceEdit;
+    const std::weak_ptr<AuroraSessionPrivacy> identity(privacy);
+    const auto windowId = streamWindowId;
+    const auto preview = edit->files.filePath(QStringLiteral("confirmed.png"));
+    QThreadPool::globalInstance()->start([edit, identity, windowId, action, request, file, preview] {
+        using State = AuroraPrivacyAppearanceState;
+        const auto session = identity.lock();
+        if (!session || !session->live || !edit->live) return;
+        auto reply = runAuroraPrivacyAppearance(session->target, action, file, session->live, edit->live);
+        if (!session->live || !edit->live) return;
+        auto saved = AuroraMacPrivacyAppearanceView::defaultStyle();
+        if (reply.state == State::Image) {
+            if (writeAppearanceImage(preview, reply.png)) {
+                const auto digest = QCryptographicHash::hash(reply.png, QCryptographicHash::Sha256).toHex();
+                saved = AuroraMacPrivacyAppearanceView::customStyle(QStringLiteral("remote-") + QString::fromLatin1(digest),
+                    QStringLiteral("已保存样式"), preview);
+            } else {
+                reply.state = State::Failed;
+            }
+        }
+        const auto state = reply.state;
+        const auto mainLoop = CFRunLoopGetMain();
+        CFRunLoopPerformBlock(mainLoop, kCFRunLoopCommonModes, ^{
+            const auto current = identity.lock();
+            if (!current || !current->live || !edit->live) return;
+            auto* owner = auroraToolbar(nativeWindow(SDL_GetWindowFromID(windowId)));
+            if (!owner || owner->privacy != current || owner->_appearanceEdit != edit) return;
+            auto* editor = owner->_appearanceEditor;
+            const auto unsupported = QStringLiteral("被控端暂不支持自定义屏保。");
+            if (action == AuroraPrivacyAppearanceAction::Read) {
+                if (state == State::Default || state == State::Image) {
+                    editor->begin(QString::fromNSString(owner->_device.stringValue), saved);
+                    editor->capability(true, QString());
+                } else {
+                    editor->capability(false, state == State::Unsupported ? unsupported
+                        : QStringLiteral("当前无法读取被控设备的屏保设置。"));
+                }
+            } else if (state == State::Saved) {
+                editor->finishSave(request, QStringLiteral("saved"), QString());
+            } else if (state == State::Unconfirmed) {
+                editor->finishSave(request, QStringLiteral("unconfirmed"),
+                    QStringLiteral("保存结果待确认。重新打开设置可核对设备上的样式。"));
+            } else {
+                editor->finishSave(request, QStringLiteral("failed"), state == State::Unsupported
+                    ? unsupported : QStringLiteral("无法保存屏保样式，请重试。"));
+                if (state == State::Unsupported) editor->capability(false, unsupported);
+            }
+        });
+        CFRunLoopWakeUp(mainLoop);
+    });
 }
 
 - (void)saveControlValue:(NSString*)value forKey:(NSString*)key
@@ -2017,6 +2312,119 @@ static void installSessionToolbar(NSWindow* native, AuroraSessionToolbarControll
     _connectionRefresh = nil;
 }
 
+- (void)showDisplaysFrom:(const QRectF&)rect
+{
+    if (!_qtTitle || !_qtTitleHost.quickView || _displayState.isEmpty()) return;
+    [self closeControlCenter];
+    [self closeConnectionDetails];
+    sendAction(streamWindowId, AuroraToolbarAction::ReleaseMouse);
+
+    NSMenu* menu = [[[NSMenu alloc] initWithTitle:@"显示器"] autorelease];
+    menu.autoenablesItems = NO;
+    const bool busy = privacy && privacy->displayBusy;
+    for (const auto& value : _displayState.value(QStringLiteral("displays")).toList()) {
+        const auto item = value.toMap();
+        const auto id = item.value(QStringLiteral("id")).toString();
+        NSMenuItem* entry = [menu addItemWithTitle:item.value(QStringLiteral("name")).toString().toNSString()
+            action:@selector(selectDisplayFromMenu:) keyEquivalent:@""];
+        entry.target = self;
+        entry.representedObject = id.toNSString();
+        const bool selected = _displayState.value(QStringLiteral("activeDisplayId")).toString() == id;
+        entry.state = selected ? NSControlStateValueOn : NSControlStateValueOff;
+        entry.enabled = !selected && !busy && _displayState.value(QStringLiteral("canSelect")).toBool() &&
+            item.value(QStringLiteral("ready")).toBool();
+        if (item.value(QStringLiteral("removable")).toBool()) {
+            NSMenuItem* remove = [menu addItemWithTitle:[NSString stringWithFormat:@"关闭 %@", entry.title]
+                action:@selector(removeDisplayFromMenu:) keyEquivalent:@""];
+            remove.target = self;
+            remove.representedObject = id.toNSString();
+            remove.enabled = !busy;
+            remove.indentationLevel = 1;
+        }
+    }
+    [menu addItem:NSMenuItem.separatorItem];
+    NSMenuItem* create = [menu addItemWithTitle:@"新增虚拟显示器" action:@selector(createDisplayFromMenu:) keyEquivalent:@""];
+    create.target = self;
+    create.enabled = !busy && _displayState.value(QStringLiteral("canCreate")).toBool();
+    NSView* view = _qtTitleHost.quickView;
+    const auto anchor = cocoaAnchor(view, rect);
+    const auto edge = view.isFlipped ? NSMaxY(anchor) : NSMinY(anchor);
+    [menu popUpMenuPositioningItem:nil atLocation:NSMakePoint(NSMinX(anchor), edge) inView:view];
+}
+
+- (void)selectDisplayFromMenu:(NSMenuItem*)sender
+{
+    [self requestDisplay:QStringLiteral("select") id:QString::fromNSString(sender.representedObject)];
+}
+
+- (void)removeDisplayFromMenu:(NSMenuItem*)sender
+{
+    [self requestDisplay:QStringLiteral("remove") id:QString::fromNSString(sender.representedObject)];
+}
+
+- (void)createDisplayFromMenu:(NSMenuItem*)sender
+{
+    (void)sender;
+    [self requestDisplay:QStringLiteral("create") id:QString()];
+}
+
+- (void)checkDisplays
+{
+    if (_qtTitle && !_checkedDisplays)
+        [self requestDisplay:QStringLiteral("list") id:QString()];
+}
+
+- (void)requestDisplay:(const QString&)operation id:(const QString&)id
+{
+    if (!privacy || !privacy->live || privacy->target.program.isEmpty() || privacy->displayBusy || !_qtTitle) return;
+    if (operation == QLatin1String("select") && !_displayState.value(QStringLiteral("canSelect")).toBool()) return;
+    const bool reading = operation == QLatin1String("list");
+    if (!reading && (privacy->busy || (privacy->state != AuroraPrivacyState::Off &&
+                                      privacy->state != AuroraPrivacyState::Unsupported))) {
+        _qtTitle->rootObject()->setProperty("displayActionError", QStringLiteral("暂时无法更改显示器，请确认隐私保护已关闭。"));
+        [self requestPrivacy:AuroraPrivacyOperation::Status];
+        return;
+    }
+
+    privacy->displayBusy = !reading;
+    _checkedDisplays = YES;
+    _qtTitle->rootObject()->setProperty("displayRequestBusy", !reading);
+    _qtTitle->rootObject()->setProperty("creatingDisplay", operation == QLatin1String("create"));
+    _qtTitle->rootObject()->setProperty("displayActionError", QString());
+    const std::weak_ptr<AuroraSessionPrivacy> weak(privacy);
+    const auto windowId = streamWindowId;
+    QThreadPool::globalInstance()->start([weak, windowId, operation, id]() {
+        const auto session = weak.lock();
+        if (!session || !session->live) return;
+        const auto snapshot = AuroraDisplayControls::snapshot(
+            runAuroraDisplayCommand(session->target, operation, id, session->live));
+        if (!session->live) return;
+
+        const auto mainLoop = CFRunLoopGetMain();
+        CFRunLoopPerformBlock(mainLoop, kCFRunLoopCommonModes, ^{
+            const auto current = weak.lock();
+            if (!current || !current->live) return;
+            current->displayBusy = false;
+            AuroraSessionToolbarController* toolbar = auroraToolbar(nativeWindow(SDL_GetWindowFromID(windowId)));
+            if (!toolbar || toolbar->privacy != current || !toolbar->_qtTitle) return;
+            auto* chrome = toolbar->_qtTitle->rootObject();
+            chrome->setProperty("displayRequestBusy", false);
+            chrome->setProperty("creatingDisplay", false);
+            if (!snapshot.isEmpty()) {
+                toolbar->_displayState = snapshot;
+                chrome->setProperty("displaySnapshot", snapshot);
+            }
+            if (operation != QLatin1String("list") &&
+                (snapshot.value(QStringLiteral("status")).toString() != QLatin1String("ok") ||
+                 (operation == QLatin1String("select") && snapshot.value(QStringLiteral("activeDisplayId")).toString() != id))) {
+                if (snapshot.isEmpty()) [toolbar requestDisplay:QStringLiteral("list") id:QString()];
+                chrome->setProperty("displayActionError", QStringLiteral("被控端未确认显示器变更。"));
+            }
+        });
+        CFRunLoopWakeUp(mainLoop);
+    });
+}
+
 - (void)updatePrivacyMenu
 {
     if (_controlCenter.visible && _controlPage == 4) [self renderControlCenter];
@@ -2024,7 +2432,7 @@ static void installSessionToolbar(NSWindow* native, AuroraSessionToolbarControll
 
 - (void)requestPrivacy:(AuroraPrivacyOperation)operation
 {
-    if (!privacy || !privacy->live || privacy->target.program.isEmpty() || privacy->busy) {
+    if (!privacy || !privacy->live || privacy->target.program.isEmpty() || privacy->busy || privacy->displayBusy) {
         return;
     }
     privacy->busy = true;
@@ -2190,6 +2598,7 @@ bool installAuroraSessionToolbar(SDL_Window* window, const QString& deviceName, 
         return false;
     }
     if (native.toolbar.delegate == controller) {
+        [controller checkDisplays];
         [controller showIfWindowed];
         return true;
     }
@@ -2200,19 +2609,29 @@ bool installAuroraSessionToolbar(SDL_Window* window, const QString& deviceName, 
 
 bool serviceAuroraQtChrome(SDL_Window* window)
 {
-    if (!qtTitleVisible && !qtControlsVisible) return false;
+    if (!qtTitleVisible && !qtControlsVisible && !qtAppearanceVisible) return false;
     // Cocoa's common run-loop sources flush QPA/Quick without taking native
     // NSEvents away from SDL_WaitEventTimeout's Cocoa dispatcher.
     @autoreleasepool {
         CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, true);
         if (qtTitleVisible) [auroraToolbar(nativeWindow(window)) checkQtTitleBar];
     }
-    return qtTitleVisible || qtControlsVisible;
+    return qtTitleVisible || qtControlsVisible || qtAppearanceVisible;
 }
 
 bool auroraRouteLocalSessionKey(SDL_Window* window, const SDL_KeyboardEvent& key, bool captureActive)
 {
     return [auroraToolbar(nativeWindow(window)) routeLocalKey:key captureActive:captureActive];
+}
+
+bool auroraPrivacyEditorOwnsInput()
+{
+    return qtAppearanceVisible;
+}
+
+bool auroraRoutePrivacyEditorMouseButton(SDL_Window* window, const SDL_MouseButtonEvent& button)
+{
+    return [auroraToolbar(nativeWindow(window)) routePrivacyEditorMouseButton:button];
 }
 
 void auroraRestoreSessionVideoFocus(SDL_Window* window)

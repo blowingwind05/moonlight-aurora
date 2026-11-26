@@ -2509,7 +2509,8 @@ void Session::execInternal()
         case SDL_KEYUP:
         case SDL_KEYDOWN:
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
-            if (event.key.windowID == SDL_GetWindowID(m_Window) &&
+            if ((event.key.windowID == SDL_GetWindowID(m_Window) || auroraPrivacyEditorOwnsInput() ||
+                 (event.type == SDL_KEYUP && event.key.windowID == 0)) &&
                 auroraRouteLocalSessionKey(m_Window, event.key, m_InputHandler->isCaptureActive())) break;
 #endif
             presence.runCallbacks();
@@ -2518,6 +2519,7 @@ void Session::execInternal()
         case SDL_MOUSEBUTTONDOWN:
         case SDL_MOUSEBUTTONUP:
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+            if (auroraRoutePrivacyEditorMouseButton(m_Window, event.button)) break;
             if (event.type == SDL_MOUSEBUTTONDOWN && event.button.windowID == SDL_GetWindowID(m_Window))
                 auroraRestoreSessionVideoFocus(m_Window);
 #endif
@@ -2525,9 +2527,15 @@ void Session::execInternal()
             m_InputHandler->handleMouseButtonEvent(&event.button);
             break;
         case SDL_MOUSEMOTION:
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+            if (auroraPrivacyEditorOwnsInput()) break;
+#endif
             m_InputHandler->handleMouseMotionEvent(&event.motion);
             break;
         case SDL_MOUSEWHEEL:
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+            if (auroraPrivacyEditorOwnsInput()) break;
+#endif
             m_InputHandler->handleMouseWheelEvent(&event.wheel);
             break;
         case SDL_CONTROLLERAXISMOTION:
@@ -2563,6 +2571,9 @@ void Session::execInternal()
         case SDL_FINGERDOWN:
         case SDL_FINGERMOTION:
         case SDL_FINGERUP:
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+            if (auroraPrivacyEditorOwnsInput()) break;
+#endif
             m_InputHandler->handleTouchFingerEvent(&event.tfinger);
             break;
         }

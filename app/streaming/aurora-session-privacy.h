@@ -44,6 +44,21 @@ AuroraPrivacyState runAuroraPrivacyCommand(const AuroraPrivacyTarget& target, Au
 QByteArray runAuroraBitrateCommand(const AuroraPrivacyTarget& target, const AuroraBitrate::Request& request,
                                   const std::atomic<bool>& live);
 
+enum class AuroraPrivacyAppearanceAction { Read, Reset, Save };
+enum class AuroraPrivacyAppearanceState { Default, Image, Saved, Unsupported, Failed, Unconfirmed };
+
+struct AuroraPrivacyAppearanceReply {
+    AuroraPrivacyAppearanceState state = AuroraPrivacyAppearanceState::Failed;
+    QByteArray png;
+};
+
+AuroraPrivacyAppearanceReply runAuroraPrivacyAppearance(const AuroraPrivacyTarget& target,
+    AuroraPrivacyAppearanceAction action, const QString& file,
+    const std::atomic<bool>& sessionLive, const std::atomic<bool>& editorLive);
+
+QByteArray runAuroraDisplayCommand(const AuroraPrivacyTarget& target, const QString& operation, const QString& id,
+                                   const std::atomic<bool>& live);
+
 struct AuroraSessionPrivacy {
     explicit AuroraSessionPrivacy(AuroraPrivacyTarget target) : target(std::move(target)) {}
 
@@ -55,10 +70,11 @@ struct AuroraSessionPrivacy {
     QElapsedTimer lastStatusCheck;
     bool busy = false;
     bool bitrateBusy = false;
+    bool displayBusy = false;
     bool changeRejected = false;
 
     bool canKeepApplication() const {
-        return live && !busy && !bitrateBusy &&
+        return live && !busy && !bitrateBusy && !displayBusy &&
             (state == AuroraPrivacyState::Off || state == AuroraPrivacyState::Unsupported);
     }
 };

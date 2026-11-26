@@ -20,6 +20,7 @@
 
 #ifdef AURORA_STREAM_RUNTIME
 #include "AuroraStreamEntry.h"
+#include "qt-session/AuroraPrivacyArtwork.h"
 #endif
 
 // Don't let SDL hook our main function, since Qt is already
@@ -384,6 +385,8 @@ static int runAuroraPairedCommand(int argc, char** argv)
 {
     const char* command = argv[1];
     const bool privacy = std::strcmp(command, "privacy") == 0;
+    const bool appearance = std::strcmp(command, "privacy-appearance") == 0;
+    const bool displays = std::strcmp(command, "display-control") == 0;
     const bool bitrate = std::strcmp(command, "bitrate") == 0;
     const bool probe = std::strcmp(command, "route-probe") == 0;
     AuroraBitrate::Request bitrateRequest;
@@ -393,9 +396,10 @@ static int runAuroraPairedCommand(int argc, char** argv)
               stderr);
         return 2;
     }
-    if (!bitrate && argc != 5) {
+    if ((displays && argc != 5 && argc != 6) || (!bitrate && !appearance && !displays && argc != 5)) {
         fprintf(stderr, "Usage: AuroraStream --aurora-runtime %s <ip:port> <host-uuid> <%s>\n",
-            command, probe ? "sample|access" : privacy ? "status|on|off|display-off" : "restart|shutdown");
+            command, displays ? "list|create|select <id>|remove <id>" :
+            probe ? "sample|access" : privacy ? "status|on|off|display-off" : "restart|shutdown");
         return 2;
     }
 #ifdef Q_OS_MACOS
@@ -403,10 +407,21 @@ static int runAuroraPairedCommand(int argc, char** argv)
 #endif
     QCoreApplication app(argc, argv);
     const auto args = app.arguments();
-    if (bitrate && args.size() != expectedArgumentCount) {
+    if ((bitrate || appearance || displays) && args.size() != expectedArgumentCount) {
+        return 2;
+    }
+    if (appearance && args.size() != 5 && args.size() != 6) {
         return 2;
     }
     const auto action = args[4];
+    const bool validAppearance = appearance &&
+        ((args.size() == 5 && (action == "read" || action == "reset")) ||
+         (args.size() == 6 && action == "save"));
+    const auto displayId = displays && args.size() == 6 ? args[5] : QString();
+    static const QRegularExpression displayIdPattern(QStringLiteral(R"(\A[1-9][0-9]{0,9}\z)"));
+    const bool validDisplay = displays && ((args.size() == 5 && (action == "list" || action == "create")) ||
+        (args.size() == 6 && (action == "select" || action == "remove") &&
+         displayIdPattern.match(displayId).hasMatch() && displayId.toUInt() > 0));
     const bool probeAccess = probe && action == "access";
     const auto endpoint = QRegularExpression(QStringLiteral(
         R"(\A(?:\[([0-9A-Fa-f:.]+)\]|([0-9]{1,3}(?:\.[0-9]{1,3}){3})):([0-9]{1,5})\z)")).match(args[2]);
@@ -416,7 +431,7 @@ static int runAuroraPairedCommand(int argc, char** argv)
     const auto uuidPattern = QRegularExpression(QStringLiteral(
         R"(\A[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\z)"));
     const int httpsPort = port + DEFAULT_HTTPS_PORT - DEFAULT_HTTP_PORT;
-    const bool validAction = bitrate || (probe
+    const bool validAction = displays ? validDisplay : appearance ? validAppearance : bitrate || (probe
         ? (action == "sample" || probeAccess) && NvHTTP::hasAuthenticatedHostFingerprint()
         : privacy ? (action == "status" || action == "on" || action == "off" || action == "display-off")
                   : (action == "restart" || action == "shutdown"));
@@ -435,7 +450,7 @@ static int runAuroraPairedCommand(int argc, char** argv)
     }
 
     const auto certificate = ComputerManager::readSavedCertificate(uuid);
-    const bool verifyControlHost = certificate.isNull() && (privacy || bitrate) &&
+    const bool verifyControlHost = certificate.isNull() && (privacy || bitrate || appearance || displays) &&
         NvHTTP::hasAuthenticatedHostFingerprint();
     if (certificate.isNull() && !probe && !verifyControlHost) {
         fputs("Aurora has no saved pairing certificate for this host.\n", stderr);
@@ -484,6 +499,17 @@ static int runAuroraPairedCommand(int argc, char** argv)
             const qint64 median = successful
                 ? (measured[(successful - 1) / 2] + measured[successful / 2]) / 2 : 0;
             printf("aurora-route/1,%d,%lld\n", successful, static_cast<long long>(median));
+        } else if (displays) {
+            const auto response = http.sendAuroraDisplayControl(action, displayId, clientIdentity);
+            return puts(response.constData()) >= 0 && fflush(stdout) == 0 ? 0 : 4;
+        } else if (appearance) {
+            const auto png = action == "save" ? AuroraPrivacyArtwork::prepare(args[5]) : QByteArray();
+            if (action == "save" && png.isEmpty()) {
+                fputs("Aurora could not read this privacy screen image.\n", stderr);
+                return 5;
+            }
+            const auto response = http.sendAuroraPrivacyAppearance(action, png, clientIdentity);
+            return puts(response.constData()) >= 0 && fflush(stdout) == 0 ? 0 : 4;
         } else if (bitrate) {
             const auto result = http.sendAuroraBitrate(bitrateRequest, clientIdentity);
             puts(result.constData());
@@ -601,7 +627,8 @@ int main(int argc, char *argv[])
     if (operation == AuroraStreamOperation::ClientProof)
         return runAuroraClientProof(argc, argv);
     if (operation == AuroraStreamOperation::Power || operation == AuroraStreamOperation::Privacy ||
-        operation == AuroraStreamOperation::Bitrate || operation == AuroraStreamOperation::RouteProbe) {
+        operation == AuroraStreamOperation::Bitrate || operation == AuroraStreamOperation::RouteProbe ||
+        operation == AuroraStreamOperation::PrivacyAppearance || operation == AuroraStreamOperation::DisplayControl) {
         return runAuroraPairedCommand(argc, argv);
     }
     if (argc > 1 && std::strcmp(argv[1], "wallpaper") == 0) {

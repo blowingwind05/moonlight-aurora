@@ -22,6 +22,8 @@ bool installAuroraSessionToolbar(SDL_Window* window, const QString& deviceName, 
                                  const std::shared_ptr<AuroraSessionPrivacy>& privacy, int videoWidth, int videoHeight);
 bool serviceAuroraQtChrome(SDL_Window* window);
 bool auroraRouteLocalSessionKey(SDL_Window* window, const SDL_KeyboardEvent& key, bool captureActive);
+bool auroraPrivacyEditorOwnsInput();
+bool auroraRoutePrivacyEditorMouseButton(SDL_Window* window, const SDL_MouseButtonEvent& button);
 void auroraRestoreSessionVideoFocus(SDL_Window* window);
 bool auroraSessionToolbarTransitioning(SDL_Window* window);
 void prepareAuroraSessionToolbarForFullscreenChange(SDL_Window* window);

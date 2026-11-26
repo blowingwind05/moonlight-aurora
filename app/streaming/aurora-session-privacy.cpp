@@ -2,6 +2,7 @@
 #include "../AuroraStreamEntry.h"
 #include "../backend/aurora-bitrate.h"
 #include "../backend/nvaddress.h"
+#include "../qt-session/AuroraPrivacyArtwork.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -48,10 +49,18 @@ AuroraPrivacyTarget makeAuroraPrivacyTarget(const NvAddress& address, int httpsP
     return {program, QDir::currentPath(), NvAddress(host, address.port()).toString(), uuid, environment};
 }
 
+struct SessionCommandOutcome {
+    bool started = false;
+    int exitCode = -1;
+};
+
 static QByteArray runAuroraSessionCommand(const AuroraPrivacyTarget& target, const QString& command,
-                                          const QStringList& options, int maxOutput, const std::atomic<bool>& live)
+                                          const QStringList& options, int maxOutput, const std::atomic<bool>& live,
+                                          int timeoutMs = 8000, const std::atomic<bool>* editorLive = nullptr,
+                                          SessionCommandOutcome* outcome = nullptr)
 {
-    if (!live || target.program.isEmpty()) {
+    const auto canRun = [&] { return live && (!editorLive || *editorLive); };
+    if (!canRun() || target.program.isEmpty()) {
         return {};
     }
 
@@ -72,7 +81,8 @@ static QByteArray runAuroraSessionCommand(const AuroraPrivacyTarget& target, con
     bool completed = false;
     bool invalid = false;
     auto readOutput = [&]() {
-        output += child.readAllStandardOutput();
+        if (!invalid)
+            output += child.read(maxOutput + 1 - output.size());
         if (output.size() > maxOutput) {
             invalid = true;
             loop.quit();
@@ -80,6 +90,9 @@ static QByteArray runAuroraSessionCommand(const AuroraPrivacyTarget& target, con
     };
 
     QObject::connect(&child, &QProcess::readyReadStandardOutput, &loop, readOutput);
+    QObject::connect(&child, &QProcess::started, &loop, [&] {
+        if (outcome) outcome->started = true;
+    });
     QObject::connect(&child, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), &loop,
                      [&](int, QProcess::ExitStatus) {
         completed = true;
@@ -96,16 +109,16 @@ static QByteArray runAuroraSessionCommand(const AuroraPrivacyTarget& target, con
         loop.quit();
     });
     QObject::connect(&cancellation, &QTimer::timeout, &loop, [&]() {
-        if (!live) {
+        if (!canRun()) {
             loop.quit();
         }
     });
 
     // This event loop runs only in the worker. SDL owns the AppKit thread during streaming.
-    timeout.start(8000);
+    timeout.start(timeoutMs);
     cancellation.start(80);
     child.start();
-    if (!completed && !invalid && live) {
+    if (!completed && !invalid && canRun()) {
         loop.exec();
     }
     if (!completed) {
@@ -113,7 +126,9 @@ static QByteArray runAuroraSessionCommand(const AuroraPrivacyTarget& target, con
         child.waitForFinished(300);
     }
     readOutput();
-    if (!live || !completed || invalid || child.exitStatus() != QProcess::NormalExit || child.exitCode() != 0) {
+    if (outcome && completed && !invalid && child.exitStatus() == QProcess::NormalExit)
+        outcome->exitCode = child.exitCode();
+    if (!canRun() || !completed || invalid || child.exitStatus() != QProcess::NormalExit || child.exitCode() != 0) {
         return {};
     }
     if (output.endsWith("\r\n")) {
@@ -125,6 +140,15 @@ static QByteArray runAuroraSessionCommand(const AuroraPrivacyTarget& target, con
         return {};
     }
     return output;
+}
+
+QByteArray runAuroraDisplayCommand(const AuroraPrivacyTarget& target, const QString& operation, const QString& id,
+                                   const std::atomic<bool>& live)
+{
+    QStringList options{operation};
+    if (!id.isEmpty())
+        options.append(id);
+    return runAuroraSessionCommand(target, QStringLiteral("display-control"), options, 8194, live);
 }
 
 AuroraPrivacyState runAuroraPrivacyCommand(const AuroraPrivacyTarget& target, AuroraPrivacyOperation operation,
@@ -167,4 +191,53 @@ QByteArray runAuroraBitrateCommand(const AuroraPrivacyTarget& target, const Auro
     const auto output = runAuroraSessionCommand(target, QStringLiteral("bitrate"),
         options, AuroraBitrate::MaxReplyBytes + 2, live);
     return AuroraBitrate::validatedLine(request, output);
+}
+
+AuroraPrivacyAppearanceReply runAuroraPrivacyAppearance(const AuroraPrivacyTarget& target,
+    AuroraPrivacyAppearanceAction action, const QString& file,
+    const std::atomic<bool>& sessionLive, const std::atomic<bool>& editorLive)
+{
+    using State = AuroraPrivacyAppearanceState;
+    const bool read = action == AuroraPrivacyAppearanceAction::Read;
+    QStringList args;
+    switch (action) {
+    case AuroraPrivacyAppearanceAction::Read:
+        args << QStringLiteral("read");
+        break;
+    case AuroraPrivacyAppearanceAction::Reset:
+        args << QStringLiteral("reset");
+        break;
+    case AuroraPrivacyAppearanceAction::Save:
+        if (file.isEmpty() || !QFileInfo(file).isAbsolute()) return {};
+        args << QStringLiteral("save") << file;
+        break;
+    }
+
+    constexpr int maxImageLine = 6 + 4 * ((AuroraPrivacyArtwork::MaxEncodedBytes + 2) / 3);
+    SessionCommandOutcome outcome;
+    // The appearance HTTP command allows 10 seconds for the request itself.
+    const auto reply = runAuroraSessionCommand(target, QStringLiteral("privacy-appearance"), args,
+        (read ? maxImageLine : 16) + 2, sessionLive, 20000, &editorLive, &outcome);
+    if (reply == "unsupported") return {State::Unsupported, {}};
+    if (!read && reply == "saved") return {State::Saved, {}};
+    if (read && reply == "default") return {State::Default, {}};
+    if (read && reply.startsWith("image=")) {
+        const auto payload = reply.mid(6);
+        const auto png = QByteArray::fromBase64(payload, QByteArray::AbortOnBase64DecodingErrors);
+        if (png.isEmpty() || png.size() > AuroraPrivacyArtwork::MaxEncodedBytes || png.toBase64() != payload ||
+            !png.startsWith(QByteArray::fromHex("89504e470d0a1a0a"))) return {};
+        QBuffer buffer;
+        buffer.setData(png);
+        if (!buffer.open(QIODevice::ReadOnly)) return {};
+        QImageReader reader(&buffer, "png");
+        const auto size = reader.size();
+        if (size.isEmpty() || qMax(size.width(), size.height()) > AuroraPrivacyArtwork::MaxImageEdge ||
+            reader.read().isNull()) return {};
+        return {State::Image, png};
+    }
+    // The paired command uses the same exit status for a rejected request and
+    // a lost response after submission. Only its preflight exits are definitive.
+    if (!read && outcome.started && outcome.exitCode != 2 && outcome.exitCode != 3 && outcome.exitCode != 5)
+        return {State::Unconfirmed, {}};
+    return {};
 }

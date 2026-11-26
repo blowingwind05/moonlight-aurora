@@ -196,6 +196,10 @@ public:
     QByteArray sendAuroraPrivacy(const QString& action, const QSslConfiguration& clientIdentity);
 #ifdef AURORA_STREAM_RUNTIME
     QByteArray sendAuroraBitrate(const AuroraBitrate::Request& request, const QSslConfiguration& clientIdentity);
+    QByteArray sendAuroraDisplayControl(const QString& action, const QString& id,
+                                        const QSslConfiguration& clientIdentity);
+    QByteArray sendAuroraPrivacyAppearance(const QString& action, const QByteArray& png,
+                                          const QSslConfiguration& clientIdentity);
 #endif
 
     static
@@ -217,7 +221,9 @@ private:
                    NvLogLevel logLevel,
                    qint64 maxBytes = 0,
                    const QSslConfiguration* pinnedPostIdentity = nullptr,
-                   bool* pairedNotFound = nullptr);
+                   bool* pairedNotFound = nullptr,
+                   const QByteArray& postData = {},
+                   bool pairedGet = false);
 
     QNetworkReply* openAuroraPairedPost(const QString& command, const QString& query,
                                       const QSslConfiguration& clientIdentity, qint64 maxBytes,
