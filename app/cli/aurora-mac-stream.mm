@@ -6,6 +6,7 @@
 #include "streaming/aurora-session-toolbar.h"
 #include "streaming/session.h"
 #include "qt-session/AuroraConnectionView.h"
+#include "qt-session/AuroraMacControlsView.h"
 
 #import <AppKit/AppKit.h>
 #import <QuartzCore/QuartzCore.h>
@@ -113,9 +114,8 @@ NSColor* rgb(unsigned color)
     const CGFloat height = std::max<CGFloat>(236, std::min<CGFloat>(576, NSHeight(usable) - 72));
     std::unique_ptr<AuroraConnectionView> qt;
     NSWindow* window = nil;
-    if (qEnvironmentVariableIntValue("AURORA_QT_SESSION") == 1 &&
-        QGuiApplication::platformName() == QStringLiteral("cocoa")) {
-        qt = std::make_unique<AuroraConnectionView>();
+    if (auroraMacSessionChromeEnabled()) {
+        qt = std::make_unique<AuroraConnectionView>(auroraMacSessionQml(QStringLiteral("MacConnectionStage.qml")));
         if (qt->status() == QQuickView::Ready) {
             qt->setFlags(Qt::Window | Qt::CustomizeWindowHint | Qt::WindowTitleHint |
                          Qt::WindowCloseButtonHint | Qt::WindowMinimizeButtonHint);
@@ -125,6 +125,37 @@ NSColor* rgb(unsigned color)
             // On Cocoa, QWindow::winId() refers to the platform NSView.
             auto* view = reinterpret_cast<NSView*>(qt->winId());
             window = [view.window retain];
+            if (window) {
+                const NSSize contentSize = view.bounds.size;
+                window.styleMask |= NSWindowStyleMaskFullSizeContentView;
+                window.titleVisibility = NSWindowTitleHidden;
+                window.titlebarAppearsTransparent = YES;
+                window.titlebarSeparatorStyle = NSTitlebarSeparatorStyleNone;
+                window.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
+                auto* toolbar = [[NSToolbar alloc] initWithIdentifier:@"AuroraQtConnectionToolbar"];
+                window.toolbarStyle = NSWindowToolbarStyleUnifiedCompact;
+                window.toolbar = toolbar;
+                [toolbar release];
+                [window setContentSize:contentSize];
+
+                auto* close = [window standardWindowButton:NSWindowCloseButton];
+                auto* minimize = [window standardWindowButton:NSWindowMiniaturizeButton];
+                auto* zoom = [window standardWindowButton:NSWindowZoomButton];
+                if (!close || !minimize || !zoom) {
+                    [window release];
+                    window = nil;
+                } else {
+                    [view.superview layoutSubtreeIfNeeded];
+                    int inset = 80;
+                    for (NSButton* button in @[close, minimize, zoom]) {
+                        const NSRect bounds = [button convertRect:button.bounds toView:view];
+                        inset = std::max(inset, static_cast<int>(std::ceil(NSMaxX(bounds))) + 12);
+                    }
+                    auto* stage = qt->rootObject();
+                    stage->setProperty("deviceName", QString::fromNSString(deviceName));
+                    stage->setProperty("trafficLightsInset", inset);
+                }
+            }
         }
         if (!window) {
             qWarning("Aurora Qt connection view could not be initialized. Using the native connection view.");
@@ -148,7 +179,7 @@ NSColor* rgb(unsigned color)
     [window release];
     if (!self) return nil;
 
-    installAuroraConnectionToolbar(self.window, deviceName, self, @selector(dismissWindow:));
+    if (!qt) installAuroraConnectionToolbar(self.window, deviceName, self, @selector(dismissWindow:));
     [self.window center];
     if (qt) {
         // Keep the Qt platform delegate responsible for the window lifecycle.
@@ -221,7 +252,6 @@ NSColor* rgb(unsigned color)
 - (void)showTitle:(NSString*)title detail:(NSString*)detail
          progress:(BOOL)progress failure:(BOOL)failure offerQuit:(BOOL)offerQuit
 {
-    setAuroraConnectionToolbarFailed(self.window, failure);
     if (_qtView) {
         using Stage = AuroraConnectionView::Stage;
         const auto state = progress ? Stage::Connecting : failure ? Stage::Failed : Stage::ConfirmQuit;
@@ -233,6 +263,7 @@ NSColor* rgb(unsigned color)
         }
         return;
     }
+    setAuroraConnectionToolbarFailed(self.window, failure);
     _title.stringValue = title;
     _title.toolTip = progress ? detail : title;
     if (progress && detail.length) {

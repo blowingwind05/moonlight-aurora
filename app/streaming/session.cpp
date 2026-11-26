@@ -2112,8 +2112,7 @@ void Session::execInternal()
     // Toggle the stats overlay if requested by the user
     m_OverlayManager.setOverlayState(Overlay::OverlayDebug, m_Preferences->showPerformanceOverlay);
 
-    // Hijack this thread to be the SDL main thread. We have to do this
-    // because we want to suspend all Qt processing until the stream is over.
+    // The SDL main thread continues to own video and input during the stream.
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
     using namespace Aurora::StreamSession;
     pollfd routeSwitchInput{qEnvironmentVariableIntValue(SwitchChannel) == 1 ? STDIN_FILENO : -1, POLLIN, 0};
@@ -2127,6 +2126,11 @@ void Session::execInternal()
     SDL_Event event;
     for (;;) {
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+        const bool qtControlsOpen = auroraQtControlsVisible();
+        if (qtControlsOpen) {
+            // Draw and dispatch the connected Qt menu while SDL owns this thread.
+            QCoreApplication::processEvents(QEventLoop::AllEvents | QEventLoop::ExcludeSocketNotifiers, 4);
+        }
         if (routeSwitchInput.fd >= 0 && poll(&routeSwitchInput, 1, 0) > 0) {
             if (routeSwitchInput.revents & (POLLERR | POLLNVAL)) {
                 routeSwitchInput.fd = -1;
@@ -2173,7 +2177,11 @@ void Session::execInternal()
         // NB: This behavior was introduced in SDL 2.0.16, but had a few critical
         // issues that could cause indefinite timeouts, delayed joystick detection,
         // and other problems.
-        if (!SDL_WaitEventTimeout(&event, isEmbedded ? 80 : 1000)) {
+        int eventTimeout = isEmbedded ? 80 : 1000;
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+        if (qtControlsOpen) eventTimeout = 16;
+#endif
+        if (!SDL_WaitEventTimeout(&event, eventTimeout)) {
             presence.runCallbacks();
             continue;
         }

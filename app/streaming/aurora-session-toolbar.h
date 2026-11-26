@@ -20,6 +20,7 @@ enum class AuroraToolbarAction : Sint32 {
 
 bool installAuroraSessionToolbar(SDL_Window* window, const QString& deviceName, bool connectionPoor,
                                  const std::shared_ptr<AuroraSessionPrivacy>& privacy, int videoWidth, int videoHeight);
+bool auroraQtControlsVisible();
 bool auroraSessionToolbarTransitioning(SDL_Window* window);
 void prepareAuroraSessionToolbarForFullscreenChange(SDL_Window* window);
 void finishAuroraSessionToolbarFullscreenChange(SDL_Window* window, bool accepted);

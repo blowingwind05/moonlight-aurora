@@ -4,6 +4,7 @@
 #include <vector>
 #include "aurora-session-privacy.h"
 #include "../backend/aurora-bitrate.h"
+#include "../qt-session/AuroraMacControlsView.h"
 
 #import <AppKit/AppKit.h>
 #import <QuartzCore/QuartzCore.h>
@@ -29,6 +30,7 @@ namespace {
     NSString* const ContextItem = @"AuroraSessionContext";
     NSString* const ActionsItem = @"AuroraSessionActions";
     char ControllerKey;
+    bool qtControlsVisible = false;  // Accessed on the SDL/Cocoa main thread.
 
     enum class BitrateMode { Unchecked, SavedOnly, Live, Retry };
 
@@ -718,6 +720,7 @@ namespace {
     AuroraToolbarButton* _disconnect;
     NSImageView* _brand;
     AuroraControlPanel* _controlCenter;
+    AuroraMacControlsView* _qtControls;
     AuroraToolbarButton* _controlAnchor;
     id _controlMonitor;
     NSMutableDictionary<NSString*, NSString*>* _preferences;
@@ -763,6 +766,8 @@ namespace {
 - (void)finishBitrateRequest:(const AuroraBitrate::Request&)request reply:(const QByteArray&)reply;
 - (void)closeControlCenter;
 - (void)positionControlCenter;
+- (void)showControlPage:(NSInteger)page;
+- (void)dispatchControlAction:(AuroraToolbarAction)action;
 @end
 
 static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
@@ -841,6 +846,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     NSNotificationCenter* notifications = NSNotificationCenter.defaultCenter;
     [notifications addObserver:self selector:@selector(dismissControlCenter:) name:NSApplicationDidResignActiveNotification object:nil];
     [notifications addObserver:self selector:@selector(dismissControlCenter:) name:NSWindowWillCloseNotification object:window];
+    [notifications addObserver:self selector:@selector(dismissControlCenter:) name:NSWindowWillMoveNotification object:window];
     [notifications addObserver:self selector:@selector(windowResized:) name:NSWindowDidResizeNotification object:window];
     [notifications addObserver:self selector:@selector(positionDisplayTab:) name:NSWindowDidUpdateNotification object:window];
     [notifications addObserver:self selector:@selector(windowWillEnterFullscreen:) name:NSWindowWillEnterFullScreenNotification object:window];
@@ -1018,7 +1024,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 {
     if ([self fullscreenTransitioning]) return;
     if (_floatingPanel.parentWindow == _window) [self positionFullscreenControls];
-    if (_controlCenter.visible) [self positionControlCenter];
+    if (_controlCenter.visible) [self closeControlCenter];
     if (!_nativeFullscreen && !(_window.styleMask & NSWindowStyleMaskFullScreen)) {
         [self resizeItems];
     }
@@ -1158,6 +1164,48 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     return button;
 }
 
+- (BOOL)renderQtControlHome
+{
+    if (_controlPage != 0 || _showFloatingControls || _nativeFullscreen ||
+        [self fullscreenTransitioning] || !auroraMacSessionChromeEnabled()) return NO;
+    if (!_qtControls) {
+        _qtControls = new AuroraMacControlsView(auroraMacSessionQml(QStringLiteral("MacStreamControls.qml")));
+        if (_qtControls->status() != QQuickView::Ready) {
+            delete _qtControls;
+            _qtControls = nullptr;
+            qWarning("Aurora Qt controls could not be loaded. Using the native menu.");
+            return NO;
+        }
+        _qtControls->onOpenPage = [self](int page) { [self showControlPage:page]; };
+        _qtControls->onToggleFullscreen = [self] { [self dispatchControlAction:AuroraToolbarAction::ToggleFullscreen]; };
+        _qtControls->onDisconnect = [self] { [self dispatchControlAction:AuroraToolbarAction::Disconnect]; };
+    }
+
+    auto* root = _controlCenter.contentView;
+    CGFloat available = NSHeight(_window.contentView.bounds) - 32;
+    if (_window.screen) available = std::min(available, NSHeight(_window.screen.visibleFrame) - 100);
+    auto* menu = _qtControls->rootObject();
+    menu->setProperty("heightLimit", qRound(std::max(CGFloat(124), available)));
+    const NSSize size = NSMakeSize(menu->width(), menu->height());
+    if (size.width <= 0 || size.height <= 0) return NO;
+
+    _qtControls->resize(qRound(size.width), qRound(size.height));
+    auto* view = reinterpret_cast<NSView*>(_qtControls->winId());
+    if (!view) return NO;
+    [_controlCenter setContentSize:size];
+    view.frame = root.bounds;
+    [root addSubview:view];
+    _qtControls->show();
+    _controlCenter.initialFirstResponder = view;
+    qtControlsVisible = true;
+    if (_controlCenter.visible) {
+        [self positionControlCenter];
+        [_controlCenter makeFirstResponder:view];
+    }
+    _qtControls->focusInitial(_controlCenter.keyboardNavigation);
+    return YES;
+}
+
 - (void)renderControlCenter
 {
     if (!_controlCenter) return;
@@ -1168,7 +1216,12 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     _bitrateSlider = nil;
     [_controlCenter makeFirstResponder:nil];
     _controlCenter.initialFirstResponder = nil;
+    if (_qtControls && _qtControls->isVisible()) {
+        qtControlsVisible = false;
+        _qtControls->hide();
+    }
     root.subviews = @[];
+    if ([self renderQtControlHome]) return;
     auto* body = [[[AuroraControlPageView alloc] initWithFrame:NSMakeRect(0, 0, 274, 0)] autorelease];
     CGFloat y = 0;
     auto row = [&](NSString* title, NSString* symbol, SEL action, NSInteger tag, BOOL next = NO) {
@@ -1360,7 +1413,12 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 
 - (void)openControlPage:(NSButton*)button
 {
-    _controlPage = button.tag;
+    [self showControlPage:button.tag];
+}
+
+- (void)showControlPage:(NSInteger)page
+{
+    _controlPage = page;
     [self renderControlCenter];
     if (_controlPage == 1 && (_bitrateMode == BitrateMode::Unchecked || _bitrateMode == BitrateMode::Retry)) {
         [self requestBitrate:AuroraBitrate::Request{}];
@@ -1373,7 +1431,11 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 
 - (void)runControlAction:(NSButton*)button
 {
-    auto action = static_cast<AuroraToolbarAction>(button.tag);
+    [self dispatchControlAction:static_cast<AuroraToolbarAction>(button.tag)];
+}
+
+- (void)dispatchControlAction:(AuroraToolbarAction)action
+{
     [self closeControlCenter];
     sendAction(streamWindowId, action);
 }
@@ -1406,6 +1468,10 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     if (_controlCenter.parentWindow == _window) [_window removeChildWindow:_controlCenter];
     _controlCenter.keyboardNavigation = NO;
     [_controlCenter makeFirstResponder:nil];
+    if (_qtControls && _qtControls->isVisible()) {
+        qtControlsVisible = false;
+        _qtControls->hide();
+    }
     [_controlCenter orderOut:nil];
     [_controlAnchor markMenuOpen:NO];
     _controlAnchor = nil;
@@ -1758,6 +1824,11 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 {
     [NSNotificationCenter.defaultCenter removeObserver:self];
     [self closeControlCenter];
+    if (_qtControls) {
+        auto* view = reinterpret_cast<NSView*>(_qtControls->winId());
+        [view removeFromSuperview];
+        delete _qtControls;
+    }
     [_controlCenter release];
     [_preferences release];
     _connectionDetails.delegate = nil;
@@ -1861,6 +1932,11 @@ bool installAuroraSessionToolbar(SDL_Window* window, const QString& deviceName, 
 
     installSessionToolbar(native, controller);
     return true;
+}
+
+bool auroraQtControlsVisible()
+{
+    return qtControlsVisible;
 }
 
 bool auroraSessionToolbarTransitioning(SDL_Window* window)
