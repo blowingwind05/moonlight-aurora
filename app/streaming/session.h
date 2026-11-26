@@ -13,6 +13,7 @@
 
 #ifdef AURORA_STREAM_RUNTIME
 #include <atomic>
+#include "aurora-display-barrier.h"
 #endif
 
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
@@ -62,6 +63,11 @@ public:
 
 #ifdef AURORA_STREAM_RUNTIME
     bool transportLost() const { return m_TransportLost.load(); }
+    // These three actions are scoped to the active SDL worker and its thread.
+    static bool pauseAuroraDisplayInput();
+    static bool queueAuroraDisplayBarrier(uint32_t generation, uint32_t firstFrame);
+    static bool releaseAuroraDisplayInput();
+    static bool auroraDisplayInputPaused();
 #ifdef Q_OS_DARWIN
     bool routeSwitched() const { return m_RouteSwitched; }
 #endif
@@ -185,6 +191,7 @@ private:
     AUDIO_RENDERER_CALLBACKS m_AudioCallbacks;
     NvComputer* m_Computer;
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    void updateAuroraDisplayCallbacks();
     std::shared_ptr<AuroraSessionPrivacy> m_AuroraPrivacy;
     SDL_atomic_t m_AuroraConnectionPoor{};
     QRect m_AuroraScreenGeometry;
@@ -203,6 +210,10 @@ private:
     bool m_UnexpectedTermination;
 #ifdef AURORA_STREAM_RUNTIME
     std::atomic_bool m_TransportLost{false};
+    bool m_AuroraPresentationCapable = false;
+    bool m_AuroraDisplayOffered = false;
+    SDL_threadID m_AuroraDisplayThread = 0;
+    Aurora::DisplayBarrier m_AuroraDisplayBarrier;
 #ifdef Q_OS_DARWIN
     bool m_RouteSwitched = false;
 #endif

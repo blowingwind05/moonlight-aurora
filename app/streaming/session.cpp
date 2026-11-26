@@ -90,6 +90,77 @@ CONNECTION_LISTENER_CALLBACKS Session::k_ConnCallbacks = {
 Session* Session::s_ActiveSession;
 QSemaphore Session::s_ActiveSessionSemaphore(1);
 
+#ifdef AURORA_STREAM_RUNTIME
+namespace {
+std::atomic_bool auroraPointerPaused{false};
+}
+
+bool Session::auroraDisplayInputPaused()
+{
+    return auroraPointerPaused.load();
+}
+
+bool Session::pauseAuroraDisplayInput()
+{
+    auto* session = get();
+    if (!session || session->m_AuroraDisplayThread != SDL_ThreadID() || !session->m_AuroraDisplayOffered ||
+        session->m_TransportLost || !session->m_VideoDecoder || !session->m_VideoDecoder->canConfirmAuroraPresentation() ||
+        !session->m_AuroraDisplayBarrier.pause()) return false;
+    auroraPointerPaused = true;
+    // End any previous gesture before the coordinator asks to change monitors.
+    session->m_InputHandler->resetAuroraDisplayPointer();
+    return true;
+}
+
+bool Session::queueAuroraDisplayBarrier(uint32_t generation, uint32_t firstFrame)
+{
+    auto* session = get();
+    return session && session->m_AuroraDisplayThread == SDL_ThreadID() && !session->m_TransportLost &&
+        session->m_AuroraDisplayBarrier.queue(generation, firstFrame);
+}
+
+bool Session::releaseAuroraDisplayInput()
+{
+    auto* session = get();
+    if (!session || session->m_AuroraDisplayThread != SDL_ThreadID()) return false;
+    const bool switched = session->m_AuroraDisplayBarrier.sent();
+    if (!session->m_AuroraDisplayBarrier.release()) return false;
+    auroraPointerPaused = false;
+    if (switched) session->m_InputHandler->enableAuroraDisplayPointer();
+    return true;
+}
+
+#ifdef Q_OS_DARWIN
+void Session::updateAuroraDisplayCallbacks()
+{
+    if (!m_AuroraPrivacy) return;
+    const std::weak_ptr<AuroraSessionPrivacy> worker = m_AuroraPrivacy;
+    const auto current = [worker] {
+        const auto privacy = worker.lock();
+        const auto* session = get();
+        return privacy && privacy->live && session && session->m_AuroraPrivacy == privacy &&
+            session->m_AuroraDisplayThread == SDL_ThreadID();
+    };
+
+    m_AuroraPrivacy->pauseDisplayInput = {};
+    m_AuroraPrivacy->presentDisplayAfter = {};
+    m_AuroraPrivacy->releaseDisplayInput = {};
+    if (!m_AuroraDisplayThread || !m_AuroraDisplayOffered || m_AuroraPrivacy->target.program.isEmpty()) return;
+
+    // A renderer reset can temporarily remove presentation support. Keep
+    // release available to the UI if it already paused this worker.
+    if (auroraDisplayInputPaused() || (m_VideoDecoder && m_VideoDecoder->canConfirmAuroraPresentation())) {
+        m_AuroraPrivacy->releaseDisplayInput = [current] { if (current()) releaseAuroraDisplayInput(); };
+    }
+    if (!m_VideoDecoder || !m_VideoDecoder->canConfirmAuroraPresentation()) return;
+    m_AuroraPrivacy->pauseDisplayInput = [current] { return current() && pauseAuroraDisplayInput(); };
+    m_AuroraPrivacy->presentDisplayAfter = [current](quint32 generation, quint32 frame) {
+        return current() && queueAuroraDisplayBarrier(generation, frame);
+    };
+}
+#endif
+#endif
+
 void Session::clStageStarting(int stage)
 {
     // We know this is called on the same thread as LiStartConnection()
@@ -544,6 +615,9 @@ bool Session::populateDecoderProperties(SDL_Window* window)
         return false;
     }
 
+#ifdef AURORA_STREAM_RUNTIME
+    m_AuroraPresentationCapable = decoder->canConfirmAuroraPresentation();
+#endif
     m_VideoCallbacks.capabilities = decoder->getDecoderCapabilities();
     if (m_VideoCallbacks.capabilities & CAPABILITY_PULL_RENDERER) {
         // It is an error to pass a push callback when in pull mode
@@ -1565,8 +1639,19 @@ bool Session::startConnectionAsync()
         }
 #endif
         bool requestClientCursor = false;
+        bool requestDisplaySwitch = false;
 #ifdef AURORA_STREAM_RUNTIME
         requestClientCursor = m_Preferences->absoluteMouseMode;
+        bool displayControl = false;
+#ifdef Q_OS_WIN32
+        displayControl = AuroraEmbeddedSession::current().enabled() &&
+            qEnvironmentVariableIntValue(Aurora::StreamSession::DisplayChannel) == 1;
+#elif defined(Q_OS_DARWIN)
+        displayControl = m_AuroraNativeLaunch;
+#endif
+        requestDisplaySwitch = displayControl && m_AuroraPresentationCapable && m_StreamConfig.requireEncryption &&
+            !http.serverCert().isNull() && http.httpsPort();
+        m_AuroraDisplayOffered = requestDisplaySwitch;
 #endif
         m_ClientCursorConfirmed = http.startApp(m_Computer->currentGameId != 0 ? "resume" : "launch",
                                                m_Computer->isNvidiaServerSoftware,
@@ -1576,7 +1661,7 @@ bool Session::startConnectionAsync()
                                                m_InputHandler->getAttachedGamepadMask(),
                                                !m_Preferences->multiController,
                                                rtspSessionUrl,
-                                               requestClientCursor);
+                                               requestClientCursor, requestDisplaySwitch);
     } catch (const GfeHttpResponseException& e) {
         emit displayLaunchError(tr("Host returned error: %1").arg(e.toQString()));
         return false;
@@ -2131,6 +2216,17 @@ void Session::execInternal()
         std::fflush(stdout);
     };
 #endif
+#ifdef AURORA_STREAM_RUNTIME
+    m_AuroraDisplayThread = SDL_ThreadID();
+#if defined(Q_OS_DARWIN)
+    updateAuroraDisplayCallbacks();
+#elif defined(Q_OS_WIN32)
+    const auto stdinHandle = GetStdHandle(STD_INPUT_HANDLE);
+    const bool readDisplayControl = isEmbedded && qEnvironmentVariableIntValue(Aurora::StreamSession::DisplayChannel) == 1 &&
+        stdinHandle && stdinHandle != INVALID_HANDLE_VALUE && GetFileType(stdinHandle) == FILE_TYPE_PIPE;
+    Aurora::DisplayControlReader displayControl;
+#endif
+#endif
     SDL_Event event;
     for (;;) {
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
@@ -2163,12 +2259,41 @@ void Session::execInternal()
         }
 #endif
 #if defined(Q_OS_WIN32) && defined(AURORA_STREAM_RUNTIME)
+        if (readDisplayControl) {
+            DWORD available = 0;
+            char bytes[128];
+            DWORD size = 0;
+            if (PeekNamedPipe(stdinHandle, nullptr, 0, nullptr, &available, nullptr) && available &&
+                ReadFile(stdinHandle, bytes, qMin(available, DWORD(sizeof(bytes))), &size, nullptr)) {
+                displayControl.feed({bytes, size}, [](Aurora::DisplayControlReader::Command command,
+                                                     uint32_t generation, uint32_t frame) {
+                    switch (command) {
+                    case Aurora::DisplayControlReader::Command::Pause:
+                        std::puts(pauseAuroraDisplayInput() ? Aurora::StreamSession::DisplayPaused
+                                                           : Aurora::StreamSession::DisplayPauseDenied);
+                        std::fflush(stdout);
+                        break;
+                    case Aurora::DisplayControlReader::Command::Present: queueAuroraDisplayBarrier(generation, frame); break;
+                    case Aurora::DisplayControlReader::Command::Release: releaseAuroraDisplayInput(); break;
+                    }
+                });
+            }
+        }
         if (isEmbedded && SDL_TICKS_PASSED(SDL_GetTicks(), nextEmbeddedPoll)) {
             if (embedded.stopRequested()) {
                 goto DispatchDeferredCleanup;
             }
             embedded.resize();
             nextEmbeddedPoll = SDL_GetTicks() + 80;
+        }
+#endif
+#ifdef AURORA_STREAM_RUNTIME
+        uint32_t presentedFrame;
+        if (m_AuroraDisplayOffered && !m_TransportLost && m_VideoDecoder &&
+            m_VideoDecoder->lastAuroraPresentedFrame(presentedFrame)) {
+            m_AuroraDisplayBarrier.service(presentedFrame, [](uint32_t generation, uint32_t frame) {
+                return LiSendAuroraDisplayBarrier(generation, frame) == 0;
+            });
         }
 #endif
 #if SDL_VERSION_ATLEAST(2, 0, 18) && !defined(STEAM_LINK)
@@ -2182,6 +2307,9 @@ void Session::execInternal()
         // issues that could cause indefinite timeouts, delayed joystick detection,
         // and other problems.
         int eventTimeout = isEmbedded ? 80 : 1000;
+#ifdef AURORA_STREAM_RUNTIME
+        if (m_AuroraDisplayBarrier.pending()) eventTimeout = 16;
+#endif
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
         if (qtChromeVisible) eventTimeout = 16;
 #endif
@@ -2501,6 +2629,7 @@ void Session::execInternal()
 
             SDL_AtomicUnlock(&m_DecoderLock);
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+            updateAuroraDisplayCallbacks();
             installAuroraSessionToolbar(m_Window, m_Computer->name,
                                         SDL_AtomicGet(&m_AuroraConnectionPoor) != 0, m_AuroraPrivacy, m_ActiveVideoWidth, m_ActiveVideoHeight);
 #endif
@@ -2580,6 +2709,11 @@ void Session::execInternal()
     }
 
 DispatchDeferredCleanup:
+#ifdef AURORA_STREAM_RUNTIME
+    m_AuroraDisplayThread = 0;
+    m_AuroraDisplayBarrier.release();
+    auroraPointerPaused = false;
+#endif
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
     // The macOS toolbar owns privacy state. Do not resume on another route
     // while an operation is pending or the host's privacy state is uncertain.
@@ -2587,6 +2721,7 @@ DispatchDeferredCleanup:
         m_TransportLost.store(false);
     }
     if (m_AuroraPrivacy) {
+        updateAuroraDisplayCallbacks();
         m_AuroraPrivacy->live = false;
         m_AuroraPrivacy.reset();
     }

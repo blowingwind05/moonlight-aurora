@@ -6,6 +6,7 @@
 #include <QString>
 
 #include <atomic>
+#include <functional>
 #include <utility>
 
 class NvAddress;
@@ -72,6 +73,11 @@ struct AuroraSessionPrivacy {
     bool bitrateBusy = false;
     bool displayBusy = false;
     bool changeRejected = false;
+
+    // Installed by the live SDL worker, used only from its owner thread.
+    std::function<bool()> pauseDisplayInput;
+    std::function<bool(quint32, quint32)> presentDisplayAfter;
+    std::function<void()> releaseDisplayInput;
 
     bool canKeepApplication() const {
         return live && !busy && !bitrateBusy && !displayBusy &&

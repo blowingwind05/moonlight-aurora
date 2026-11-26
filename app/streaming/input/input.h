@@ -97,6 +97,10 @@ public:
     void setControllerLED(uint16_t controllerNumber, uint8_t r, uint8_t g, uint8_t b);
 
     void handleTouchFingerEvent(SDL_TouchFingerEvent* event);
+#ifdef AURORA_STREAM_RUNTIME
+    void resetAuroraDisplayPointer();
+    void enableAuroraDisplayPointer();
+#endif
 
     int getAttachedGamepadMask();
 
@@ -207,6 +211,9 @@ private:
     int m_StreamWidth;
     int m_StreamHeight;
     bool m_AbsoluteMouseMode;
+#ifdef AURORA_STREAM_RUNTIME
+    bool m_AuroraDisplayPointer = false;
+#endif
     bool m_AbsoluteTouchMode;
     bool m_DisabledTouchFeedback;
 

@@ -449,8 +449,47 @@ void SdlInputHandler::setCaptureActive(bool active)
     updateKeyboardGrabState();
 }
 
+#ifdef AURORA_STREAM_RUNTIME
+void SdlInputHandler::enableAuroraDisplayPointer()
+{
+    const bool captured = isCaptureActive();
+    if (captured) setCaptureActive(false);
+    m_AuroraDisplayPointer = true;
+    m_AbsoluteMouseMode = true;
+    enableClientDesktopCursor();
+    if (captured) setCaptureActive(true);
+}
+
+void SdlInputHandler::resetAuroraDisplayPointer()
+{
+    for (auto timer : {m_LongPressTimer, m_DragTimer, m_LeftButtonReleaseTimer, m_RightButtonReleaseTimer})
+        SDL_RemoveTimer(timer);
+    m_LongPressTimer = m_DragTimer = m_LeftButtonReleaseTimer = m_RightButtonReleaseTimer = 0;
+    m_DragButton = 0;
+    m_NumFingersDown = 0;
+    m_LastTouchDownEvent = {};
+    m_LastTouchDownEvent.fingerId = -1;
+    m_LastTouchUpEvent = {};
+    for (auto& touch : m_TouchDownEvent) {
+        touch = {};
+        touch.fingerId = -1;
+    }
+    if (LiGetHostFeatureFlags() & LI_FF_PEN_TOUCH_EVENTS)
+        LiSendTouchEvent(LI_TOUCH_EVENT_CANCEL_ALL, 0, 0, 0, 0, 0, 0, LI_ROT_UNKNOWN);
+
+    for (int button = BUTTON_LEFT; button <= BUTTON_X2; ++button)
+        LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, button);
+#ifdef Q_OS_DARWIN
+    m_RemoteMouseButtons = 0;
+#endif
+}
+#endif
+
 void SdlInputHandler::handleTouchFingerEvent(SDL_TouchFingerEvent* event)
 {
+#ifdef AURORA_STREAM_RUNTIME
+    if (Session::auroraDisplayInputPaused()) return;
+#endif
 #if SDL_VERSION_ATLEAST(2, 0, 10)
     if (SDL_GetTouchDeviceType(event->touchId) != SDL_TOUCH_DEVICE_DIRECT) {
         // Ignore anything that isn't a touchscreen. We may get callbacks

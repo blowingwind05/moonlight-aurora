@@ -9,6 +9,10 @@ extern "C" {
 #include <libavutil/hwcontext_d3d11va.h>
 }
 
+#ifdef AURORA_STREAM_RUNTIME
+#include <mutex>
+#endif
+
 class D3D11VARenderer : public IFFmpegRenderer
 {
 public:
@@ -17,6 +21,10 @@ public:
     virtual bool initialize(PDECODER_PARAMETERS params) override;
     virtual bool prepareDecoderContext(AVCodecContext* context, AVDictionary**) override;
     virtual void renderFrame(AVFrame* frame) override;
+#ifdef AURORA_STREAM_RUNTIME
+    bool canConfirmAuroraPresentation() const override { return true; }
+    bool lastAuroraPresentedFrame(uint32_t& frame) override;
+#endif
     virtual void notifyOverlayUpdated(Overlay::OverlayType) override;
     virtual int getRendererAttributes() override;
     virtual int getDecoderCapabilities() override;
@@ -42,6 +50,10 @@ private:
     IDXGIFactory5* m_Factory;
     ID3D11Device* m_Device;
     IDXGISwapChain4* m_SwapChain;
+#ifdef AURORA_STREAM_RUNTIME
+    std::mutex m_AuroraPresentLock;
+    Aurora::PresentIds m_AuroraPresentIds;
+#endif
     ID3D11DeviceContext* m_DeviceContext;
     ID3D11RenderTargetView* m_RenderTargetView;
     SDL_mutex* m_ContextLock;

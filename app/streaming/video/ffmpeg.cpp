@@ -448,6 +448,9 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
 
     // Always request low delay decoding
     m_VideoDecoderCtx->flags |= AV_CODEC_FLAG_LOW_DELAY;
+#if defined(AURORA_STREAM_RUNTIME) && defined(AV_CODEC_FLAG_COPY_OPAQUE)
+    if (canConfirmAuroraPresentation()) m_VideoDecoderCtx->flags |= AV_CODEC_FLAG_COPY_OPAQUE;
+#endif
 
     // Allow display of corrupt frames and frames missing references
     m_VideoDecoderCtx->flags |= AV_CODEC_FLAG_OUTPUT_CORRUPT;
@@ -1700,7 +1703,19 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
 
     m_ActiveWndVideoStats.totalReassemblyTime += du->enqueueTimeMs - du->receiveTimeMs;
 
+#if defined(AURORA_STREAM_RUNTIME) && defined(AV_CODEC_FLAG_COPY_OPAQUE)
+    if (m_VideoDecoderCtx->flags & AV_CODEC_FLAG_COPY_OPAQUE) {
+        // Keep the wire frame number with the corresponding decoded frame
+        // even when the codec drops or delays output.
+        const auto number = static_cast<uint32_t>(du->frameNumber);
+        m_Pkt->opaque_ref = av_buffer_alloc(sizeof(number));
+        if (m_Pkt->opaque_ref) std::memcpy(m_Pkt->opaque_ref->data, &number, sizeof(number));
+    }
+#endif
     err = avcodec_send_packet(m_VideoDecoderCtx, m_Pkt);
+#if defined(AURORA_STREAM_RUNTIME) && defined(AV_CODEC_FLAG_COPY_OPAQUE)
+    av_buffer_unref(&m_Pkt->opaque_ref);
+#endif
     if (err < 0) {
         char errorstring[512];
         av_strerror(err, errorstring, sizeof(errorstring));
@@ -1738,3 +1753,18 @@ void FFmpegVideoDecoder::renderFrameOnMainThread()
     m_Pacer->renderOnMainThread();
 }
 
+#ifdef AURORA_STREAM_RUNTIME
+bool FFmpegVideoDecoder::canConfirmAuroraPresentation() const
+{
+#ifdef AV_CODEC_FLAG_COPY_OPAQUE
+    return m_FrontendRenderer && m_FrontendRenderer->canConfirmAuroraPresentation();
+#else
+    return false;
+#endif
+}
+
+bool FFmpegVideoDecoder::lastAuroraPresentedFrame(uint32_t& frame)
+{
+    return canConfirmAuroraPresentation() && m_FrontendRenderer->lastAuroraPresentedFrame(frame);
+}
+#endif

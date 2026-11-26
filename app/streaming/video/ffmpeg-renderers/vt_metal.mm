@@ -359,6 +359,10 @@ public:
         return true;
     }
 
+#ifdef AURORA_STREAM_RUNTIME
+    bool canConfirmAuroraPresentation() const override { return true; }
+#endif
+
     // Caller frees frame after we return
     virtual void renderFrame(AVFrame* frame) override
     { @autoreleasepool {
@@ -507,6 +511,15 @@ public:
             }];
         }
 
+#ifdef AURORA_STREAM_RUNTIME
+        uint32_t frameNumber;
+        if (auroraVideoFrameNumber(frame, frameNumber)) {
+            const auto presented = m_AuroraPresented;
+            [m_NextDrawable addPresentedHandler:^(id<MTLDrawable> drawable) {
+                if (drawable.presentedTime > 0) presented->record(frameNumber);
+            }];
+        }
+#endif
         // Flip to the newly rendered buffer
         [commandBuffer presentDrawable:m_NextDrawable];
         [commandBuffer commit];

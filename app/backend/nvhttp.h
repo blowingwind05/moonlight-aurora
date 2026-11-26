@@ -183,7 +183,8 @@ public:
              int gamepadMask,
              bool persistGameControllersOnDisconnect,
              QString& rtspSessionUrl,
-             bool requestClientCursor = false);
+             bool requestClientCursor = false,
+             bool requestDisplaySwitch = false);
 
     QVector<NvApp>
     getAppList();

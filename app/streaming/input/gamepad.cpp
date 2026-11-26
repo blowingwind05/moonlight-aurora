@@ -181,6 +181,9 @@ Uint32 SdlInputHandler::mouseEmulationTimerCallback(Uint32 interval, void *param
     deltaX = qAbs(deltaX) > MOUSE_EMULATION_DEADZONE ? deltaX - MOUSE_EMULATION_DEADZONE : 0;
     deltaY = qAbs(deltaY) > MOUSE_EMULATION_DEADZONE ? deltaY - MOUSE_EMULATION_DEADZONE : 0;
 
+#ifdef AURORA_STREAM_RUNTIME
+    if (Session::auroraDisplayInputPaused()) return interval;
+#endif
     if (deltaX != 0 || deltaY != 0) {
         LiSendMouseMoveEvent((short)deltaX, (short)deltaY);
     }
@@ -283,13 +286,17 @@ void SdlInputHandler::handleControllerButtonEvent(SDL_ControllerButtonEvent* eve
         }
     }
 
+    bool emulatePointer = state->mouseEmulationTimer != 0;
+#ifdef AURORA_STREAM_RUNTIME
+    emulatePointer = emulatePointer && !Session::auroraDisplayInputPaused();
+#endif
     if (event->state == SDL_PRESSED) {
         state->buttons |= k_ButtonMap[event->button];
 
         if (event->button == SDL_CONTROLLER_BUTTON_START) {
             state->lastStartDownTime = SDL_GetTicks();
         }
-        else if (state->mouseEmulationTimer != 0) {
+        else if (emulatePointer) {
             if (event->button == SDL_CONTROLLER_BUTTON_A) {
                 LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT);
             }
@@ -344,7 +351,7 @@ void SdlInputHandler::handleControllerButtonEvent(SDL_ControllerButtonEvent* eve
                 }
             }
         }
-        else if (state->mouseEmulationTimer != 0) {
+        else if (emulatePointer) {
             if (event->button == SDL_CONTROLLER_BUTTON_A) {
                 LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
             }

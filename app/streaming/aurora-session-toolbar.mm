@@ -786,6 +786,7 @@ namespace {
     AuroraMacTitleBarView* _qtTitle;
     AuroraQtTitleHost* _qtTitleHost;
     QVariantMap _displayState;
+    AuroraDisplayControls::DisplaySwitch _displaySwitch;
     QElapsedTimer _lastDisplayProbe;
     int _displayProbeCount;
     BOOL _displayProbePending;
@@ -847,6 +848,8 @@ namespace {
 - (BOOL)routePrivacyEditorMouseButton:(const SDL_MouseButtonEvent&)button;
 - (void)prepareQtTitleBar;
 - (void)checkDisplays;
+- (BOOL)displaySwitchPending;
+- (void)finishDisplaySwitch:(const QString&)message uncertain:(BOOL)uncertain;
 - (void)requestDisplay:(const QString&)operation id:(const QString&)id;
 - (void)showDisplaysFrom:(const QRectF&)rect;
 - (void)selectDisplayFromMenu:(NSMenuItem*)sender;
@@ -2334,7 +2337,7 @@ static void installSessionToolbar(NSWindow* native, AuroraSessionToolbarControll
         const bool selected = _displayState.value(QStringLiteral("activeDisplayId")).toString() == id;
         entry.state = selected ? NSControlStateValueOn : NSControlStateValueOff;
         entry.enabled = !selected && !busy && _displayState.value(QStringLiteral("canSelect")).toBool() &&
-            item.value(QStringLiteral("ready")).toBool();
+            item.value(QStringLiteral("selectable")).toBool();
         if (item.value(QStringLiteral("removable")).toBool()) {
             NSMenuItem* remove = [menu addItemWithTitle:[NSString stringWithFormat:@"关闭 %@", entry.title]
                 action:@selector(removeDisplayFromMenu:) keyEquivalent:@""];
@@ -2370,8 +2373,38 @@ static void installSessionToolbar(NSWindow* native, AuroraSessionToolbarControll
     [self requestDisplay:QStringLiteral("create") id:QString()];
 }
 
+- (BOOL)displaySwitchPending
+{
+    return _displaySwitch.active();
+}
+
+- (void)finishDisplaySwitch:(const QString&)message uncertain:(BOOL)uncertain
+{
+    _displaySwitch.clear();
+    if (privacy)
+        privacy->displayBusy = false;
+    if (_qtTitle) {
+        auto* chrome = _qtTitle->rootObject();
+        chrome->setProperty("displayRequestBusy", false);
+        chrome->setProperty("switchingDisplayId", QString());
+        chrome->setProperty("displayActionError", message);
+    }
+    if (uncertain || !privacy || !privacy->releaseDisplayInput)
+        sendAction(streamWindowId, AuroraToolbarAction::Disconnect);
+    else
+        privacy->releaseDisplayInput();
+}
+
 - (void)checkDisplays
 {
+    if (_displaySwitch.active()) {
+        if (_displaySwitch.expired()) {
+            [self finishDisplaySwitch:QStringLiteral("切换显示器超时，串流已结束。") uncertain:YES];
+        } else if (!_displayProbePending && _lastDisplayProbe.hasExpired(250)) {
+            [self requestDisplay:QStringLiteral("list") id:QString()];
+        }
+        return;
+    }
     if (!_qtTitle || !_qtTitle->isVisible() || !_displayState.isEmpty() ||
         _displayUnsupported || _displayProbePending || _displayProbeCount >= 4) return;
     if (_lastDisplayProbe.isValid() && !_lastDisplayProbe.hasExpired(900)) return;
@@ -2380,9 +2413,20 @@ static void installSessionToolbar(NSWindow* native, AuroraSessionToolbarControll
 
 - (void)requestDisplay:(const QString&)operation id:(const QString&)id
 {
-    if (!privacy || !privacy->live || privacy->target.program.isEmpty() || privacy->displayBusy || !_qtTitle) return;
-    if (operation == QLatin1String("select") && !_displayState.value(QStringLiteral("canSelect")).toBool()) return;
     const bool reading = operation == QLatin1String("list");
+    const bool selecting = operation == QLatin1String("select");
+    if (!privacy || !privacy->live || privacy->target.program.isEmpty() || !_qtTitle ||
+        _displayProbePending || (privacy->displayBusy && !(reading && _displaySwitch.active()))) return;
+    if (selecting && (!_displayState.value(QStringLiteral("canSelect")).toBool() ||
+        id == _displayState.value(QStringLiteral("activeDisplayId")).toString())) return;
+    if (selecting) {
+        const auto displays = _displayState.value(QStringLiteral("displays")).toList();
+        if (std::none_of(displays.cbegin(), displays.cend(), [&](const QVariant& value) {
+            const auto display = value.toMap();
+            return display.value(QStringLiteral("id")).toString() == id &&
+                display.value(QStringLiteral("selectable")).toBool();
+        })) return;
+    }
     if (!reading && (privacy->busy || (privacy->state != AuroraPrivacyState::Off &&
                                       privacy->state != AuroraPrivacyState::Unsupported))) {
         _qtTitle->rootObject()->setProperty("displayActionError", QStringLiteral("暂时无法更改显示器，请确认隐私保护已关闭。"));
@@ -2390,23 +2434,31 @@ static void installSessionToolbar(NSWindow* native, AuroraSessionToolbarControll
         return;
     }
 
-    if (reading) {
-        if (_displayProbePending) return;
-        _displayProbePending = YES;
-        _lastDisplayProbe.start();
-        ++_displayProbeCount;
+    auto* chrome = _qtTitle->rootObject();
+    if (selecting) {
+        if (!privacy->pauseDisplayInput || !privacy->presentDisplayAfter || !privacy->releaseDisplayInput ||
+            !privacy->pauseDisplayInput()) {
+            chrome->setProperty("displayActionError", QStringLiteral("当前串流无法切换显示器。"));
+            return;
+        }
+        _displaySwitch.begin(id);
+        chrome->setProperty("switchingDisplayId", id);
     }
-    privacy->displayBusy = !reading;
-    _qtTitle->rootObject()->setProperty("displayRequestBusy", !reading);
-    _qtTitle->rootObject()->setProperty("creatingDisplay", operation == QLatin1String("create"));
-    _qtTitle->rootObject()->setProperty("displayActionError", QString());
+    _displayProbePending = YES;
+    _lastDisplayProbe.start();
+    if (reading && !_displaySwitch.active())
+        ++_displayProbeCount;
+    privacy->displayBusy = !reading || _displaySwitch.active();
+    chrome->setProperty("displayRequestBusy", privacy->displayBusy);
+    chrome->setProperty("creatingDisplay", operation == QLatin1String("create"));
+    chrome->setProperty("displayActionError", QString());
     const std::weak_ptr<AuroraSessionPrivacy> weak(privacy);
     const auto windowId = streamWindowId;
     QThreadPool::globalInstance()->start([weak, windowId, operation, id]() {
         const auto session = weak.lock();
         if (!session || !session->live) return;
         const auto response = runAuroraDisplayCommand(session->target, operation, id, session->live);
-        const auto snapshot = AuroraDisplayControls::snapshot(response);
+        auto snapshot = AuroraDisplayControls::snapshot(response);
         const bool unsupported = response == "unsupported";
         if (!session->live) return;
 
@@ -2414,23 +2466,48 @@ static void installSessionToolbar(NSWindow* native, AuroraSessionToolbarControll
         CFRunLoopPerformBlock(mainLoop, kCFRunLoopCommonModes, ^{
             const auto current = weak.lock();
             if (!current || !current->live) return;
-            current->displayBusy = false;
             AuroraSessionToolbarController* toolbar = auroraToolbar(nativeWindow(SDL_GetWindowFromID(windowId)));
-            if (!toolbar || toolbar->privacy != current || !toolbar->_qtTitle) return;
-            if (operation == QLatin1String("list")) {
-                toolbar->_displayProbePending = NO;
-                toolbar->_displayUnsupported = unsupported;
+            if (!toolbar || toolbar->privacy != current) return;
+            toolbar->_displayProbePending = NO;
+            current->displayBusy = toolbar->_displaySwitch.active();
+            if (!toolbar->_qtTitle) {
+                if (current->displayBusy)
+                    [toolbar finishDisplaySwitch:QString() uncertain:YES];
+                return;
             }
+            if (operation == QLatin1String("list"))
+                toolbar->_displayUnsupported = unsupported;
             auto* chrome = toolbar->_qtTitle->rootObject();
-            chrome->setProperty("displayRequestBusy", false);
+            chrome->setProperty("displayRequestBusy", current->displayBusy);
             chrome->setProperty("creatingDisplay", false);
             if (!snapshot.isEmpty()) {
-                toolbar->_displayState = snapshot;
-                chrome->setProperty("displaySnapshot", snapshot);
+                auto visibleSnapshot = snapshot;
+                if (!current->pauseDisplayInput || !current->presentDisplayAfter || !current->releaseDisplayInput)
+                    visibleSnapshot.insert(QStringLiteral("canSelect"), false);
+                toolbar->_displayState = visibleSnapshot;
+                chrome->setProperty("displaySnapshot", visibleSnapshot);
             }
-            if (operation != QLatin1String("list") &&
-                (snapshot.value(QStringLiteral("status")).toString() != QLatin1String("ok") ||
-                 (operation == QLatin1String("select") && snapshot.value(QStringLiteral("activeDisplayId")).toString() != id))) {
+            if (current->displayBusy) {
+                using Progress = AuroraDisplayControls::SwitchProgress;
+                const auto progress = toolbar->_displaySwitch.observe(snapshot);
+                if (progress == Progress::Applied) {
+                    [toolbar finishDisplaySwitch:QString() uncertain:NO];
+                } else if (progress == Progress::Rejected) {
+                    [toolbar finishDisplaySwitch:QStringLiteral("被控端未能切换显示器。") uncertain:NO];
+                } else if (progress == Progress::Uncertain) {
+                    [toolbar finishDisplaySwitch:QStringLiteral("无法确认鼠标目标，串流已结束。") uncertain:YES];
+                } else if (progress == Progress::Present) {
+                    const auto& switching = toolbar->_displaySwitch;
+                    if (current->presentDisplayAfter &&
+                        current->presentDisplayAfter(switching.generation(), switching.firstFrame())) {
+                        toolbar->_displaySwitch.presentationRequested();
+                    } else {
+                        [toolbar finishDisplaySwitch:QStringLiteral("无法确认新画面，串流已结束。") uncertain:YES];
+                    }
+                }
+                return;
+            }
+            if (operation != QLatin1String("list") && snapshot.value(QStringLiteral("status")).toString() != QLatin1String("ok")) {
                 if (snapshot.isEmpty()) [toolbar requestDisplay:QStringLiteral("list") id:QString()];
                 chrome->setProperty("displayActionError", QStringLiteral("被控端未确认显示器变更。"));
             }
@@ -2622,18 +2699,20 @@ bool installAuroraSessionToolbar(SDL_Window* window, const QString& deviceName, 
 
 bool serviceAuroraQtChrome(SDL_Window* window)
 {
-    if (!qtTitleVisible && !qtControlsVisible && !qtAppearanceVisible) return false;
+    auto* toolbar = auroraToolbar(nativeWindow(window));
+    const bool switching = [toolbar displaySwitchPending];
+    if (!qtTitleVisible && !qtControlsVisible && !qtAppearanceVisible && !switching) return false;
     // Cocoa's common run-loop sources flush QPA/Quick without taking native
     // NSEvents away from SDL_WaitEventTimeout's Cocoa dispatcher.
     @autoreleasepool {
         CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, true);
-        if (qtTitleVisible) {
-            auto* toolbar = auroraToolbar(nativeWindow(window));
+        toolbar = auroraToolbar(nativeWindow(window));
+        if (qtTitleVisible)
             [toolbar checkQtTitleBar];
+        if (qtTitleVisible || switching)
             [toolbar checkDisplays];
-        }
     }
-    return qtTitleVisible || qtControlsVisible || qtAppearanceVisible;
+    return qtTitleVisible || qtControlsVisible || qtAppearanceVisible || [toolbar displaySwitchPending];
 }
 
 bool auroraRouteLocalSessionKey(SDL_Window* window, const SDL_KeyboardEvent& key, bool captureActive)

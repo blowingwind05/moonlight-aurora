@@ -3,9 +3,15 @@
 #include <Limelight.h>
 #include <SDL.h>
 #include "streaming/streamutils.h"
+#ifdef AURORA_STREAM_RUNTIME
+#include "streaming/session.h"
+#endif
 
 void SdlInputHandler::handleMouseButtonEvent(SDL_MouseButtonEvent* event)
 {
+#ifdef AURORA_STREAM_RUNTIME
+    if (Session::auroraDisplayInputPaused()) return;
+#endif
     int button;
 
     if (event->which == SDL_TOUCH_MOUSEID) {
@@ -84,6 +90,9 @@ void SdlInputHandler::handleMouseButtonEvent(SDL_MouseButtonEvent* event)
 
 void SdlInputHandler::handleMouseMotionEvent(SDL_MouseMotionEvent* event)
 {
+#ifdef AURORA_STREAM_RUNTIME
+    if (Session::auroraDisplayInputPaused()) return;
+#endif
     if (!isCaptureActive()) {
         // Not capturing
         return;
@@ -170,6 +179,9 @@ void SdlInputHandler::handleMouseMotionEvent(SDL_MouseMotionEvent* event)
 
 void SdlInputHandler::handleMouseWheelEvent(SDL_MouseWheelEvent* event)
 {
+#ifdef AURORA_STREAM_RUNTIME
+    if (Session::auroraDisplayInputPaused()) return;
+#endif
     if (!isCaptureActive()) {
         // Not capturing
         return;

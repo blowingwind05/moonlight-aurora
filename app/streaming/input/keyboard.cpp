@@ -60,6 +60,9 @@ void SdlInputHandler::performSpecialKeyCombo(KeyCombo combo)
         break;
 
     case KeyComboToggleMouseMode:
+#ifdef AURORA_STREAM_RUNTIME
+        if (m_AuroraDisplayPointer) break;
+#endif
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "Detected mouse mode toggle combo");
 

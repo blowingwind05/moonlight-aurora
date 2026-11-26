@@ -545,6 +545,15 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
 
     // Present according to the decoder parameters
     hr = m_SwapChain->Present(0, flags);
+#ifdef AURORA_STREAM_RUNTIME
+    uint32_t frameNumber;
+    UINT presentId;
+    if (hr == S_OK && auroraVideoFrameNumber(frame, frameNumber) &&
+        m_SwapChain->GetLastPresentCount(&presentId) == S_OK) {
+        const std::lock_guard<std::mutex> guard(m_AuroraPresentLock);
+        m_AuroraPresentIds.submit(presentId, frameNumber);
+    }
+#endif
 
     // Release the context lock
     unlockContext(this);
@@ -561,6 +570,22 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
         return;
     }
 }
+
+#ifdef AURORA_STREAM_RUNTIME
+bool D3D11VARenderer::lastAuroraPresentedFrame(uint32_t& frame)
+{
+    const std::lock_guard<std::mutex> guard(m_AuroraPresentLock);
+    DXGI_FRAME_STATISTICS stats{};
+    const auto result = m_SwapChain->GetFrameStatistics(&stats);
+    uint32_t observed;
+    if (result == DXGI_ERROR_FRAME_STATISTICS_DISJOINT) {
+        m_AuroraPresentIds.clear();
+    } else if (result == S_OK && m_AuroraPresentIds.find(stats.PresentCount, observed)) {
+        m_AuroraPresented->record(observed);
+    }
+    return IFFmpegRenderer::lastAuroraPresentedFrame(frame);
+}
+#endif
 
 void D3D11VARenderer::renderOverlay(Overlay::OverlayType type)
 {

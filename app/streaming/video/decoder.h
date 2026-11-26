@@ -76,6 +76,10 @@ public:
     virtual QSize getDecoderMaxResolution() = 0;
     virtual int submitDecodeUnit(PDECODE_UNIT du) = 0;
     virtual void renderFrameOnMainThread() = 0;
+#ifdef AURORA_STREAM_RUNTIME
+    virtual bool canConfirmAuroraPresentation() const { return false; }
+    virtual bool lastAuroraPresentedFrame(uint32_t&) { return false; }
+#endif
     virtual void setHdrMode(bool enabled) = 0;
     virtual bool notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO info) = 0;
 };

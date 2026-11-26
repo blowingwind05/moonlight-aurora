@@ -5,6 +5,12 @@
 #include "streaming/video/decoder.h"
 #include "streaming/video/overlaymanager.h"
 
+#ifdef AURORA_STREAM_RUNTIME
+#include "streaming/aurora-display-barrier.h"
+#include <cstring>
+#include <memory>
+#endif
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 
@@ -127,6 +133,23 @@ public:
     virtual bool initialize(PDECODER_PARAMETERS params) = 0;
     virtual bool prepareDecoderContext(AVCodecContext* context, AVDictionary** options) = 0;
     virtual void renderFrame(AVFrame* frame) = 0;
+#ifdef AURORA_STREAM_RUNTIME
+    virtual bool canConfirmAuroraPresentation() const { return false; }
+    virtual bool lastAuroraPresentedFrame(uint32_t& frame) { return m_AuroraPresented->latest(frame); }
+
+protected:
+    static bool auroraVideoFrameNumber(const AVFrame* frame, uint32_t& number)
+    {
+        if (!frame->opaque_ref || frame->opaque_ref->size != sizeof(number) ||
+            (frame->flags & AV_FRAME_FLAG_CORRUPT) || frame->decode_error_flags) return false;
+        std::memcpy(&number, frame->opaque_ref->data, sizeof(number));
+        return true;
+    }
+
+    std::shared_ptr<Aurora::PresentedFrame> m_AuroraPresented = std::make_shared<Aurora::PresentedFrame>();
+
+public:
+#endif
 
     enum class InitFailureReason
     {

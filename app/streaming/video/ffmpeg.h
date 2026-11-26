@@ -25,6 +25,10 @@ public:
     virtual QSize getDecoderMaxResolution() override;
     virtual int submitDecodeUnit(PDECODE_UNIT du) override;
     virtual void renderFrameOnMainThread() override;
+#ifdef AURORA_STREAM_RUNTIME
+    bool canConfirmAuroraPresentation() const override;
+    bool lastAuroraPresentedFrame(uint32_t& frame) override;
+#endif
     virtual void setHdrMode(bool enabled) override;
     virtual bool notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO info) override;
 
