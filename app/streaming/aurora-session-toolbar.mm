@@ -49,9 +49,57 @@ namespace {
                                     blue:(color & 0xff) / 255.0 alpha:1];
     }
 
+    constexpr CGFloat ToolbarIconSize = 16;
+    constexpr CGFloat DisplayIconSize = 14;
+    constexpr CGFloat CaptionGap = 5;
+    constexpr CGFloat CaptionPadding = 4;
+
+    CGFloat textWidth(NSString* text, NSFont* font)
+    {
+        return std::ceil([text sizeWithAttributes:@{NSFontAttributeName:font}].width) + CaptionPadding;
+    }
+
+    CGFloat captionWidth(NSTextField* caption)
+    {
+        return textWidth(caption.stringValue, caption.font);
+    }
+
+    BOOL isKeyboardInput(NSEvent* event)
+    {
+        return event && (event.type == NSEventTypeKeyDown || event.type == NSEventTypeKeyUp);
+    }
+
+    NSImage* monitorImage(CGFloat size)
+    {
+        auto* icon = [NSImage imageWithSize:NSMakeSize(size, size) flipped:YES drawingHandler:^BOOL(NSRect bounds) {
+            const CGFloat stroke = size / 12;
+            const CGFloat inset = stroke / 2;
+            auto* shape = [NSBezierPath bezierPathWithRoundedRect:NSMakeRect(inset, 2 * inset,
+                size - stroke, size * .68) xRadius:1.5 yRadius:1.5];
+            const CGFloat x = NSMidX(bounds);
+            const CGFloat y = size - inset;
+            [shape moveToPoint:NSMakePoint(x, 2 * inset + size * .68)];
+            [shape lineToPoint:NSMakePoint(x, y)];
+            [shape moveToPoint:NSMakePoint(x - size * .2, y)];
+            [shape lineToPoint:NSMakePoint(x + size * .2, y)];
+            shape.lineWidth = stroke;
+            shape.lineCapStyle = NSRoundLineCapStyle;
+            [NSColor.blackColor setStroke];
+            [shape stroke];
+            return YES;
+        }];
+        [icon setTemplate:YES];
+        return icon;
+    }
+
     NSImage* controlCenterImage()
     {
-        auto* icon = [NSImage imageWithSize:NSMakeSize(24, 24) flipped:YES drawingHandler:^BOOL(NSRect bounds) {
+        auto* icon = [NSImage imageWithSize:NSMakeSize(ToolbarIconSize, ToolbarIconSize) flipped:YES
+            drawingHandler:^BOOL(NSRect bounds) {
+            [NSGraphicsContext saveGraphicsState];
+            auto* scale = [NSAffineTransform transform];
+            [scale scaleBy:ToolbarIconSize / 24];
+            [scale concat];
             auto* lines = [NSBezierPath bezierPath];
             [lines moveToPoint:NSMakePoint(3, 7)];
             [lines lineToPoint:NSMakePoint(5.5, 7)];
@@ -67,6 +115,7 @@ namespace {
             lines.lineCapStyle = NSRoundLineCapStyle;
             [NSColor.blackColor setStroke];
             [lines stroke];
+            [NSGraphicsContext restoreGraphicsState];
             return YES;
         }];
         [icon setTemplate:YES];
@@ -125,9 +174,70 @@ namespace {
 - (BOOL)mouseDownCanMoveWindow { return YES; }
 @end
 
-@interface AuroraToolbarButton : NSButton {
+@interface AuroraFocusButton : NSButton {
+    BOOL _showsKeyboardFocus;
+}
+- (void)showKeyboardFocus:(BOOL)visible;
+@end
+
+@implementation AuroraFocusButton
+- (instancetype)initWithFrame:(NSRect)frame
+{
+    self = [super initWithFrame:frame];
+    if (self) self.focusRingType = NSFocusRingTypeNone;
+    return self;
+}
+
+- (void)showKeyboardFocus:(BOOL)visible
+{
+    if (_showsKeyboardFocus == visible) return;
+    _showsKeyboardFocus = visible;
+    self.needsDisplay = YES;
+}
+
+- (BOOL)becomeFirstResponder
+{
+    if (![super becomeFirstResponder]) return NO;
+    [self showKeyboardFocus:isKeyboardInput(NSApp.currentEvent)];
+    return YES;
+}
+
+- (BOOL)resignFirstResponder
+{
+    if (![super resignFirstResponder]) return NO;
+    [self showKeyboardFocus:NO];
+    return YES;
+}
+
+- (void)mouseDown:(NSEvent*)event
+{
+    [self showKeyboardFocus:NO];
+    [super mouseDown:event];
+}
+
+- (void)keyDown:(NSEvent*)event
+{
+    if (self.window.firstResponder == self) [self showKeyboardFocus:YES];
+    [super keyDown:event];
+}
+
+- (void)drawRect:(NSRect)dirtyRect
+{
+    [super drawRect:dirtyRect];
+    if (!_showsKeyboardFocus || !self.enabled || !self.window.isKeyWindow ||
+        self.window.firstResponder != self) return;
+    auto* outline = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(self.bounds, 2, 2)
+                                                   xRadius:5 yRadius:5];
+    outline.lineWidth = 1.5;
+    [rgb(0x087cf5) setStroke];
+    [outline stroke];
+}
+@end
+
+@interface AuroraToolbarButton : AuroraFocusButton {
     NSImageView* _glyph;
-    NSTextField* _caption;
+    NSString* _label;
+    NSRect _textRect;
     NSTrackingArea* _tracking;
     BOOL _hover;
     BOOL _warning;
@@ -141,6 +251,7 @@ namespace {
 - (instancetype)initWithLabel:(NSString*)label symbol:(NSString*)symbol
                        target:(id)target action:(SEL)action warning:(BOOL)warning;
 - (void)showLabel:(BOOL)show;
+- (CGFloat)preferredWidth;
 - (void)markMenuOpen:(BOOL)open;
 - (void)useMenuLayout:(BOOL)next;
 - (void)useOptionStyle:(BOOL)selected;
@@ -160,7 +271,6 @@ namespace {
         self.title = @"";
         self.target = target;
         self.action = action;
-        self.focusRingType = NSFocusRingTypeExterior;
         self.toolTip = label;
         [self setAccessibilityLabel:label];
 
@@ -168,6 +278,8 @@ namespace {
         _glyph.imageScaling = NSImageScaleProportionallyDown;
         if ([symbol isEqualToString:ControlCenterSymbol]) {
             _glyph.image = controlCenterImage();
+        } else if ([symbol isEqualToString:@"display"]) {
+            _glyph.image = monitorImage(ToolbarIconSize);
         } else if (symbol.length > 0) {
             NSImage* image = [NSImage imageWithSystemSymbolName:symbol accessibilityDescription:nil];
             _glyph.image = [image imageWithSymbolConfiguration:[NSImageSymbolConfiguration
@@ -176,11 +288,7 @@ namespace {
         [_glyph setAccessibilityElement:NO];
         [self addSubview:_glyph];
 
-        _caption = [NSTextField labelWithString:label];
-        _caption.font = [NSFont systemFontOfSize:12];
-        _caption.lineBreakMode = NSLineBreakByTruncatingTail;
-        [_caption setAccessibilityElement:NO];
-        [self addSubview:_caption];
+        _label = [label copy];
         [self setEnabled:YES];
         [self showLabel:YES];
     }
@@ -192,39 +300,55 @@ namespace {
     [super setEnabled:enabled];
     NSColor* ink = rgb(enabled ? 0x19283f : 0x9ba7b7);
     _glyph.contentTintColor = ink;
-    _caption.textColor = ink;
+    self.needsDisplay = YES;
 }
 
 - (void)showLabel:(BOOL)show
 {
     _showsLabel = show;
-    _caption.hidden = !show;
     self.needsLayout = YES;
+    self.needsDisplay = YES;
+}
+
+- (CGFloat)glyphWidth
+{
+    return _glyph.image ? std::max(ToolbarIconSize, std::ceil(_glyph.image.size.width)) : 0;
+}
+
+- (NSFont*)labelFont
+{
+    return [NSFont systemFontOfSize:_menuRow ? 13 : 12];
+}
+
+- (CGFloat)preferredWidth
+{
+    const CGFloat glyph = [self glyphWidth];
+    return 2 * 6 + glyph + (glyph ? CaptionGap : 0) + textWidth(_label, [self labelFont]);
 }
 
 - (void)layout
 {
     [super layout];
-    constexpr CGFloat iconSize = 16;
-    constexpr CGFloat spacing = 5;
-    const NSSize captionSize = _caption.intrinsicContentSize;
-    const CGFloat maxLabelWidth = std::max<CGFloat>(0, NSWidth(self.bounds) - iconSize - spacing - 4);
-    const CGFloat labelWidth = _showsLabel ? std::min(std::ceil(captionSize.width), maxLabelWidth) : 0;
-    const CGFloat rowWidth = iconSize + (labelWidth > 0 ? spacing + labelWidth : 0);
-    const CGFloat left = _menuRow ? 8 : std::floor((NSWidth(self.bounds) - rowWidth) / 2);
-    _nextArrow.frame = NSMakeRect(NSWidth(self.bounds) - 19, NSMidY(self.bounds) - 6, 12, 12);
+    const CGFloat width = NSWidth(self.bounds);
     const CGFloat middle = NSMidY(self.bounds);
-    _glyph.frame = NSMakeRect(left, middle - iconSize / 2, iconSize, iconSize);
+    auto* font = [self labelFont];
+    const CGFloat height = std::ceil([_label sizeWithAttributes:@{NSFontAttributeName:font}].height) + 2;
+    const CGFloat textY = std::floor(middle - height / 2);
     if (_option) {
         _glyph.hidden = YES;
-        _caption.frame = self.bounds;
-        const CGFloat height = std::ceil(captionSize.height);
-        _caption.frame = NSMakeRect(0, std::floor(middle - height / 2), NSWidth(self.bounds), height);
-        return;
+        _textRect = NSMakeRect(3, textY, std::max<CGFloat>(0, width - 6), height);
+    } else {
+        const CGFloat glyph = [self glyphWidth];
+        const BOOL showText = _showsLabel && (_menuRow || width >= [self preferredWidth]);
+        const CGFloat gap = showText && glyph > 0 ? CaptionGap : 0;
+        const CGFloat trailing = _nextArrow ? 26 : 8;
+        const CGFloat room = std::max<CGFloat>(0, width - glyph - gap - (_menuRow ? 8 + trailing : 8));
+        const CGFloat label = !showText ? 0 : _menuRow ? room : textWidth(_label, font);
+        const CGFloat left = _menuRow ? 8 : std::floor((width - glyph - gap - label) / 2);
+        _glyph.frame = NSMakeRect(left, middle - ToolbarIconSize / 2, glyph, ToolbarIconSize);
+        _nextArrow.frame = NSMakeRect(width - 19, middle - 6, 12, 12);
+        _textRect = NSMakeRect(left + glyph + gap, textY, label, height);
     }
-    const CGFloat captionHeight = std::ceil(captionSize.height);
-    _caption.frame = NSMakeRect(left + iconSize + spacing, std::floor(middle - captionHeight / 2),
-                                labelWidth, captionHeight);
 }
 
 - (NSView*)hitTest:(NSPoint)point { return [super hitTest:point] ? self : nil; }
@@ -269,7 +393,6 @@ namespace {
 - (void)useMenuLayout:(BOOL)next
 {
     _menuRow = YES;
-    _caption.font = [NSFont systemFontOfSize:13];
     if (next) {
         _nextArrow = [[[NSImageView alloc] initWithFrame:NSZeroRect] autorelease];
         _nextArrow.image = [[NSImage imageWithSystemSymbolName:@"chevron.right" accessibilityDescription:nil]
@@ -284,7 +407,6 @@ namespace {
 - (void)useOptionStyle:(BOOL)selected
 {
     _option = YES;
-    _caption.alignment = NSTextAlignmentCenter;
     [self selectOption:selected];
     self.needsLayout = YES;
 }
@@ -292,7 +414,6 @@ namespace {
 - (void)selectOption:(BOOL)selected
 {
     _selectedOption = selected;
-    _caption.textColor = rgb(!self.enabled ? 0x8390a1 : selected ? 0x2350b4 : 0x19283f);
     self.needsDisplay = YES;
 }
 
@@ -308,20 +429,30 @@ namespace {
         [rgb(color) setFill];
         [[NSBezierPath bezierPathWithRoundedRect:self.bounds xRadius:6 yRadius:6] fill];
     }
+    if (_showsLabel && !NSIsEmptyRect(_textRect)) {
+        // Measure and draw with the same font. An NSTextField cell adds its own
+        // drawing insets inside its assigned frame, which can elide even a two-character label.
+        auto* paragraph = [[[NSMutableParagraphStyle alloc] init] autorelease];
+        paragraph.alignment = _option ? NSTextAlignmentCenter : NSTextAlignmentLeft;
+        paragraph.lineBreakMode = NSLineBreakByTruncatingTail;
+        const unsigned ink = !self.enabled ? (_option ? 0x8390a1 : 0x9ba7b7) :
+            _option && _selectedOption ? 0x2350b4 : 0x19283f;
+        [_label drawWithRect:_textRect
+                     options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingTruncatesLastVisibleLine
+                  attributes:@{NSFontAttributeName:[self labelFont], NSForegroundColorAttributeName:rgb(ink),
+                               NSParagraphStyleAttributeName:paragraph}
+                     context:nil];
+    }
     [super drawRect:dirtyRect];
 }
 
-- (NSRect)focusRingMaskBounds { return self.bounds; }
-- (void)drawFocusRingMask
-{
-    [[NSBezierPath bezierPathWithRoundedRect:NSInsetRect(self.bounds, 1, 1) xRadius:6 yRadius:6] fill];
-}
 - (BOOL)mouseDownCanMoveWindow { return NO; }
 
 - (void)dealloc
 {
     if (_tracking) [self removeTrackingArea:_tracking];
     [_tracking release];
+    [_label release];
     [super dealloc];
 }
 @end
@@ -382,6 +513,7 @@ namespace {
     NSTextField* _caption;
 }
 - (void)showLabel:(BOOL)show;
+- (CGFloat)preferredWidth;
 @end
 
 @implementation AuroraDisplayTab
@@ -391,8 +523,7 @@ namespace {
     if (self) {
         _glyph = [[[NSImageView alloc] initWithFrame:NSZeroRect] autorelease];
         _glyph.imageScaling = NSImageScaleProportionallyDown;
-        _glyph.image = [[NSImage imageWithSystemSymbolName:@"display" accessibilityDescription:nil]
-            imageWithSymbolConfiguration:[NSImageSymbolConfiguration configurationWithPointSize:14 weight:NSFontWeightRegular]];
+        _glyph.image = monitorImage(DisplayIconSize);
         _glyph.contentTintColor = rgb(0x19283f);
         [_glyph setAccessibilityElement:NO];
         [self addSubview:_glyph];
@@ -419,11 +550,13 @@ namespace {
     [super layout];
     const CGFloat middle = NSMidY(self.bounds);
     constexpr CGFloat foot = AuroraSessionToolbarLayout::DisplayFoot;
-    const CGFloat left = _caption.hidden ? std::floor((NSWidth(self.bounds) - 14) / 2) : foot + 11;
-    _glyph.frame = NSMakeRect(left, middle - 7, 14, 14);
+    const CGFloat groupWidth = _caption.hidden ? DisplayIconSize : DisplayIconSize + CaptionGap + captionWidth(_caption);
+    const CGFloat left = _caption.hidden ? std::floor((NSWidth(self.bounds) - groupWidth) / 2) : foot + 11;
+    _glyph.frame = NSMakeRect(left, middle - DisplayIconSize / 2, DisplayIconSize, DisplayIconSize);
     const CGFloat height = std::ceil(_caption.intrinsicContentSize.height);
-    _caption.frame = NSMakeRect(left + 20, std::floor(middle - height / 2),
-                                std::max<CGFloat>(0, NSWidth(self.bounds) - foot - left - 26), height);
+    _caption.frame = NSMakeRect(left + DisplayIconSize + CaptionGap, std::floor(middle - height / 2),
+                                std::max<CGFloat>(0, NSWidth(self.bounds) - foot - 11 - left - DisplayIconSize - CaptionGap),
+                                height);
 }
 
 - (void)drawRect:(NSRect)dirtyRect
@@ -450,10 +583,15 @@ namespace {
     [outline fill];
 }
 
-- (BOOL)mouseDownCanMoveWindow { return YES; }
+- (CGFloat)preferredWidth
+{
+    return 2 * 11 + DisplayIconSize + CaptionGap + captionWidth(_caption);
+}
+
+- (NSView*)hitTest:(NSPoint)point { return nil; }
 @end
 
-@interface AuroraConnectionStatus : NSButton
+@interface AuroraConnectionStatus : AuroraFocusButton
 @end
 
 @implementation AuroraConnectionStatus
@@ -468,11 +606,75 @@ namespace {
 - (BOOL)isFlipped { return YES; }
 @end
 
-@interface AuroraControlPanel : NSPanel
+@interface AuroraControlPanel : NSPanel {
+    NSControl* _keyboardControl;
+    BOOL _keyboardNavigation;
+}
+@property(nonatomic) BOOL keyboardNavigation;
 @end
 
 @implementation AuroraControlPanel
 - (BOOL)canBecomeKeyWindow { return YES; }
+- (BOOL)keyboardNavigation { return _keyboardNavigation; }
+
+- (void)refreshKeyboardFocus
+{
+    auto* responder = self.firstResponder;
+    NSControl* control = _keyboardNavigation && [responder isKindOfClass:NSControl.class] ? (NSControl*)responder : nil;
+    if (control == _keyboardControl) return;
+    if ([_keyboardControl isKindOfClass:AuroraFocusButton.class]) {
+        [(AuroraFocusButton*)_keyboardControl showKeyboardFocus:NO];
+    } else if (_keyboardControl) {
+        _keyboardControl.focusRingType = NSFocusRingTypeNone;
+        [_keyboardControl setKeyboardFocusRingNeedsDisplayInRect:_keyboardControl.bounds];
+    }
+    [_keyboardControl release];
+    _keyboardControl = [control retain];
+    if ([control isKindOfClass:AuroraFocusButton.class]) {
+        [(AuroraFocusButton*)control showKeyboardFocus:YES];
+    } else if (control) {
+        control.focusRingType = NSFocusRingTypeDefault;
+        [control setKeyboardFocusRingNeedsDisplayInRect:control.bounds];
+    }
+}
+
+- (void)setKeyboardNavigation:(BOOL)keyboard
+{
+    _keyboardNavigation = keyboard;
+    [self refreshKeyboardFocus];
+}
+
+- (BOOL)makeFirstResponder:(NSResponder*)responder
+{
+    const BOOL changed = [super makeFirstResponder:responder];
+    [self refreshKeyboardFocus];
+    return changed;
+}
+
+- (void)sendEvent:(NSEvent*)event
+{
+    switch (event.type) {
+    case NSEventTypeKeyDown:
+    case NSEventTypeKeyUp:
+        self.keyboardNavigation = YES;
+        break;
+    case NSEventTypeLeftMouseDown:
+    case NSEventTypeRightMouseDown:
+    case NSEventTypeOtherMouseDown:
+        self.keyboardNavigation = NO;
+        break;
+    default:
+        break;
+    }
+    [super sendEvent:event];
+}
+
+- (void)dealloc
+{
+    [_keyboardControl release];
+    _keyboardControl = nil;
+    [super dealloc];
+}
 @end
 
 @interface AuroraSessionToolbarController : NSObject <NSToolbarDelegate, NSPopoverDelegate> {
@@ -492,6 +694,7 @@ namespace {
     AuroraStatusDot* _dot;
     NSTextField* _statusText;
     AuroraDisplayTab* _display;
+    NSRect _displaySlot;
     BOOL _connectionWindow;
     AuroraToolbarButton* _controls;
     AuroraToolbarButton* _disconnect;
@@ -520,6 +723,7 @@ namespace {
 - (AuroraToolbarButton*)addButton:(NSString*)title symbol:(NSString*)symbol action:(SEL)action
                             code:(AuroraToolbarAction)code warning:(BOOL)warning;
 - (void)resizeItems;
+- (void)positionDisplayTab:(NSNotification*)notification;
 - (void)showConnectionDetails:(id)sender;
 - (void)closeConnectionDetails;
 - (void)refreshConnectionDetails:(NSTimer*)timer;
@@ -579,8 +783,8 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     _statusText.font = [NSFont systemFontOfSize:12];
     [_status addSubview:_statusText];
 
-    _display = [[[AuroraDisplayTab alloc] init] autorelease];
-    [_context addSubview:_display];
+    _display = [[AuroraDisplayTab alloc] init];
+    _display.hidden = YES;
 
     _controls = [self addButton:@"控制中心" symbol:ControlCenterSymbol action:@selector(showControls:)
                             code:AuroraToolbarAction::ReleaseMouse warning:NO];
@@ -612,6 +816,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     [notifications addObserver:self selector:@selector(dismissControlCenter:) name:NSApplicationDidResignActiveNotification object:nil];
     [notifications addObserver:self selector:@selector(dismissControlCenter:) name:NSWindowWillCloseNotification object:window];
     [notifications addObserver:self selector:@selector(windowResized:) name:NSWindowDidResizeNotification object:window];
+    [notifications addObserver:self selector:@selector(positionDisplayTab:) name:NSWindowDidUpdateNotification object:window];
     [notifications addObserver:self selector:@selector(windowWillEnterFullscreen:) name:NSWindowWillEnterFullScreenNotification object:window];
     [notifications addObserver:self selector:@selector(windowDidEnterFullscreen:) name:NSWindowDidEnterFullScreenNotification object:window];
     [notifications addObserver:self selector:@selector(windowDidExitFullscreen:) name:NSWindowDidExitFullScreenNotification object:window];
@@ -634,10 +839,13 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 {
     NSButton* zoom = [_window standardWindowButton:NSWindowZoomButton];
     const auto trafficEdge = zoom ? NSMaxX([zoom convertRect:zoom.bounds toView:nil]) : 0;
-    const NSSize nameInk = [_device.stringValue sizeWithAttributes:@{NSFontAttributeName: _device.font}];
     const auto layout = auroraSessionToolbarLayout(
         static_cast<int>(NSWidth(_window.frame)), static_cast<int>(std::ceil(trafficEdge)),
-        static_cast<int>(std::ceil(nameInk.width)) + 4, _brand != nil);
+        {static_cast<int>(captionWidth(_device)),
+         static_cast<int>(captionWidth(_statusText)) + 32,
+         static_cast<int>(std::ceil([_display preferredWidth])),
+         static_cast<int>(std::ceil([_controls preferredWidth])),
+         static_cast<int>(std::ceil([_disconnect preferredWidth]))}, _brand != nil);
     [_context resizeToWidth:layout.contextWidth()];
     [_actions resizeToWidth:layout.actionsWidth()];
 
@@ -654,15 +862,16 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     _dot.frame = NSMakeRect(leading, 14 - dot / 2, dot, dot);
     const CGFloat textX = NSMaxX(_dot.frame) + 6;
     const CGFloat textHeight = std::ceil(_statusText.intrinsicContentSize.height);
-    const CGFloat textWidth = std::min(std::ceil(_statusText.intrinsicContentSize.width),
+    const CGFloat textWidth = std::min(captionWidth(_statusText),
         std::max<CGFloat>(0, layout.status - textX - (arrow ? 15 : 0)));
     _statusText.frame = NSMakeRect(textX, std::floor(14 - textHeight / 2), textWidth, textHeight);
     const CGFloat arrowX = compactStatus ? layout.status - 10 : NSMaxX(_statusText.frame) + 5;
     _statusChevron.frame = NSMakeRect(arrowX, 8, 9, 12);
 
     [_display showLabel:layout.display > 32];
-    _display.frame = NSMakeRect(NSMaxX(_status.frame) + 6, 0,
-                                layout.display + 2 * AuroraSessionToolbarLayout::DisplayFoot, DisplayTabHeight);
+    _displaySlot = NSMakeRect(NSMaxX(_status.frame) + 6, 0,
+                              layout.display + 2 * AuroraSessionToolbarLayout::DisplayFoot, DisplayTabHeight);
+    [self positionDisplayTab:nil];
 
     [_controls showLabel:layout.controls > 32];
     [_disconnect showLabel:layout.disconnect > 32];
@@ -671,6 +880,31 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     _brand.hidden = !layout.brand;
     _brand.frame = NSMakeRect(NSMaxX(_disconnect.frame) + 8, middle - BrandSize / 2,
                               BrandSize, BrandSize);
+}
+
+- (void)positionDisplayTab:(NSNotification*)notification
+{
+    if (_nativeFullscreen || (_window.styleMask & NSWindowStyleMaskFullScreen) || !_window.toolbar.visible ||
+        _context.window != _window || _context.hiddenOrHasHiddenAncestor ||
+        !NSContainsRect(_context.visibleRect, _displaySlot)) {
+        if (!_display.hidden) _display.hidden = YES;
+        return;
+    }
+
+    // NSToolbar vertically centers item views. Anchor the painted tab to the video boundary
+    // in window coordinates so the native toolbar's padding cannot leave a seam under its feet.
+    NSView* frameView = _window.contentView;
+    if (!frameView) return;
+    while (frameView.superview) frameView = frameView.superview;
+    NSRect tab = [_context convertRect:_displaySlot toView:nil];
+    tab.origin.y = NSMaxY(_window.contentLayoutRect);
+    tab = [frameView convertRect:tab fromView:nil];
+    if (_display.superview != frameView) {
+        [_display removeFromSuperviewWithoutNeedingDisplay];
+        [frameView addSubview:_display positioned:NSWindowAbove relativeTo:nil];
+    }
+    if (!NSEqualRects(_display.frame, tab)) _display.frame = tab;
+    if (_display.hidden) _display.hidden = NO;
 }
 
 - (void)updateConnectionResult:(BOOL)failed
@@ -766,6 +1000,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     _nativeFullscreen = YES;
     _window.contentAspectRatio = NSZeroSize;
     _window.toolbar.visible = NO;
+    [self positionDisplayTab:nil];
 }
 
 - (void)windowDidEnterFullscreen:(NSNotification*)notification
@@ -840,6 +1075,8 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     _bitrateLabel = nil;
     _bitrateFeedback = nil;
     _bitrateSlider = nil;
+    [_controlCenter makeFirstResponder:nil];
+    _controlCenter.initialFirstResponder = nil;
     root.subviews = @[];
     auto* body = [[[AuroraControlPageView alloc] initWithFrame:NSMakeRect(0, 0, 274, 0)] autorelease];
     CGFloat y = 0;
@@ -861,12 +1098,22 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
         auto* group = [[[NSView alloc] initWithFrame:NSMakeRect(8, y, 258, 26)] autorelease];
         group.identifier = key;
         [group setAccessibilityLabel:title];
-        const CGFloat gap = 4;
-        const CGFloat units = labels.count + ([key isEqualToString:@"resolution"] ? 0.9 : 0);
-        const CGFloat unit = (258 - gap * (labels.count - 1)) / units;
+        constexpr CGFloat gap = 4;
+        NSFont* font = [NSFont systemFontOfSize:12];
+        std::vector<CGFloat> widths;
+        CGFloat total = 0;
+        for (NSString* text in labels) {
+            const CGFloat width = std::ceil([text sizeWithAttributes:@{NSFontAttributeName:font}].width) + 10;
+            widths.push_back(width);
+            total += width;
+        }
+        const CGFloat available = NSWidth(group.bounds) - gap * (labels.count - 1);
+        const CGFloat scale = std::min<CGFloat>(1, available / total);
+        const CGFloat extra = std::max<CGFloat>(0, (available - total) / labels.count);
         CGFloat x = 0;
         for (NSUInteger index = 0; index < labels.count; index++) {
-            const CGFloat buttonWidth = unit * ((index == 0 && units > labels.count) ? 1.9 : 1);
+            const CGFloat buttonWidth = index + 1 == labels.count ? NSWidth(group.bounds) - x :
+                std::floor(widths[index] * scale + extra);
             auto* button = [[[AuroraToolbarButton alloc] initWithLabel:labels[index] symbol:@""
                 target:self action:@selector(changeControlChoice:) warning:NO] autorelease];
             button.frame = NSMakeRect(x, 0, buttonWidth, 26);
@@ -887,6 +1134,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
         [body addSubview:field];
         auto* button = [[[NSSwitch alloc] initWithFrame:NSMakeRect(221, y + 4, 45, 23)] autorelease];
         button.controlSize = NSControlSizeSmall;
+        button.focusRingType = NSFocusRingTypeNone;
         button.identifier = key;
         button.state = ([_preferences[key] isEqualToString:@"on"] != invert) ? NSControlStateValueOn : NSControlStateValueOff;
         button.target = self;
@@ -940,6 +1188,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
                 maxValue:150 target:self action:@selector(changeControlBitrate:)];
             rate.frame = NSMakeRect(8, y, 258, 25);
             rate.continuous = NO;
+            rate.focusRingType = NSFocusRingTypeNone;
             [rate setAccessibilityLabel:@"视频码率（Mbps）"];
             [body addSubview:rate];
             _bitrateLabel = value;
@@ -980,6 +1229,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
             auto* modes = [NSSegmentedControl segmentedControlWithLabels:labels
                 trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(changePrivacyMode:)];
             modes.frame = NSMakeRect(8, y, 258, 26);
+            modes.focusRingType = NSFocusRingTypeNone;
             modes.selectedSegment = selected;
             modes.enabled = !busy && selected >= 0;
             [modes setAccessibilityLabel:@"隐私保护"];
@@ -1010,9 +1260,11 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     [_controlCenter setContentSize:NSMakeSize(width, height)];
     [root addSubview:scroll];
     [scroll.contentView scrollToPoint:NSZeroPoint];
+    [_controlCenter recalculateKeyViewLoop];
+    _controlCenter.initialFirstResponder = _controlCenter.keyboardNavigation ? body.subviews.firstObject : nil;
     if (_controlCenter.visible) {
         [self positionControlCenter];
-        [_controlCenter makeFirstResponder:body.subviews.firstObject];
+        [_controlCenter makeFirstResponder:_controlCenter.initialFirstResponder];
     }
 }
 
@@ -1062,6 +1314,8 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     if (_controlMonitor) [NSEvent removeMonitor:_controlMonitor];
     _controlMonitor = nil;
     if (_controlCenter.parentWindow == _window) [_window removeChildWindow:_controlCenter];
+    _controlCenter.keyboardNavigation = NO;
+    [_controlCenter makeFirstResponder:nil];
     [_controlCenter orderOut:nil];
     [_controlAnchor markMenuOpen:NO];
     _controlAnchor = nil;
@@ -1101,12 +1355,13 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
         frame.layer.cornerRadius = 9;
         frame.layer.masksToBounds = YES;
     }
+    _controlCenter.keyboardNavigation = isKeyboardInput(NSApp.currentEvent);
     [self renderControlCenter];
     [self positionControlCenter];
     [sender markMenuOpen:YES];
     [_window addChildWindow:_controlCenter ordered:NSWindowAbove];
     [_controlCenter makeKeyAndOrderFront:nil];
-    [_controlCenter selectNextKeyView:nil];
+    [_controlCenter makeFirstResponder:_controlCenter.initialFirstResponder];
 
     __block AuroraSessionToolbarController* controller = self;
     _controlMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:
@@ -1124,8 +1379,9 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
             auto* anchorButton = controller->_controlAnchor;
             [controller closeControlCenter];
             [controller->_window makeKeyWindow];
-            [anchorButton.window makeFirstResponder:anchorButton];
+            if ([anchorButton.window makeFirstResponder:anchorButton]) [anchorButton showKeyboardFocus:YES];
         } else {
+            controller->_controlCenter.keyboardNavigation = YES;
             controller->_controlPage = 0;
             [controller renderControlCenter];
         }
@@ -1417,6 +1673,8 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     [self closeConnectionDetails];
     [_connectionDetails release];
     [_floatingPanel release];
+    [_display removeFromSuperviewWithoutNeedingDisplay];
+    [_display release];
     [_context release];
     [_actions release];
     [super dealloc];
