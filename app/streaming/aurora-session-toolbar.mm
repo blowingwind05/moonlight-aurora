@@ -22,6 +22,7 @@ namespace {
     constexpr CGFloat BrandSize = 28;
     constexpr CGFloat ButtonHeight = 32;
     constexpr CGFloat FloatingButtonSize = 40;
+    constexpr CGFloat FloatingButtonRadius = 13;
     constexpr CGFloat FloatingButtonInset = 14;
     NSString* const ControlCenterSymbol = @"AuroraSessionControlCenter";
     NSString* const ContextItem = @"AuroraSessionContext";
@@ -178,6 +179,7 @@ namespace {
     BOOL _showsKeyboardFocus;
 }
 - (void)showKeyboardFocus:(BOOL)visible;
+- (CGFloat)keyboardFocusRadius;
 @end
 
 @implementation AuroraFocusButton
@@ -221,13 +223,16 @@ namespace {
     [super keyDown:event];
 }
 
+- (CGFloat)keyboardFocusRadius { return 5; }
+
 - (void)drawRect:(NSRect)dirtyRect
 {
     [super drawRect:dirtyRect];
     if (!_showsKeyboardFocus || !self.enabled || !self.window.isKeyWindow ||
         self.window.firstResponder != self) return;
+    const CGFloat radius = [self keyboardFocusRadius];
     auto* outline = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(self.bounds, 2, 2)
-                                                   xRadius:5 yRadius:5];
+                                                   xRadius:radius yRadius:radius];
     outline.lineWidth = 1.5;
     [rgb(0x087cf5) setStroke];
     [outline stroke];
@@ -256,6 +261,8 @@ namespace {
 - (void)useMenuLayout:(BOOL)next;
 - (void)useOptionStyle:(BOOL)selected;
 - (void)selectOption:(BOOL)selected;
+- (NSColor*)buttonFillColor;
+- (void)drawButtonBackground;
 @end
 
 @implementation AuroraToolbarButton
@@ -417,18 +424,24 @@ namespace {
     self.needsDisplay = YES;
 }
 
+- (NSColor*)buttonFillColor
+{
+    if (_option) return rgb(_selectedOption ? 0xe2e7ef : _hover ? 0xe8edf4 : 0xf4f6fa);
+    if (!self.enabled || !(_hover || _menuOpen || self.cell.highlighted)) return nil;
+    return rgb(_warning ? 0xfbe7e8 : (_menuOpen || self.cell.highlighted) ? 0xe2e7ef : 0xe8edf4);
+}
+
+- (void)drawButtonBackground
+{
+    if (auto* color = [self buttonFillColor]) {
+        [color setFill];
+        [[NSBezierPath bezierPathWithRoundedRect:self.bounds xRadius:6 yRadius:6] fill];
+    }
+}
+
 - (void)drawRect:(NSRect)dirtyRect
 {
-    if (_option) {
-        [rgb(_selectedOption ? 0xe2e7ef : _hover ? 0xe8edf4 : 0xf4f6fa) setFill];
-        [[NSBezierPath bezierPathWithRoundedRect:self.bounds xRadius:6 yRadius:6] fill];
-    }
-    if (!_option && self.enabled && (_hover || _menuOpen || self.cell.highlighted)) {
-        const unsigned color = _warning ? 0xfbe7e8 :
-            (_menuOpen || self.cell.highlighted) ? 0xe2e7ef : 0xe8edf4;
-        [rgb(color) setFill];
-        [[NSBezierPath bezierPathWithRoundedRect:self.bounds xRadius:6 yRadius:6] fill];
-    }
+    [self drawButtonBackground];
     if (_showsLabel && !NSIsEmptyRect(_textRect)) {
         // Measure and draw with the same font. An NSTextField cell adds its own
         // drawing insets inside its assigned frame, which can elide even a two-character label.
@@ -468,15 +481,16 @@ namespace {
     [self addCursorRect:self.bounds cursor:NSCursor.arrowCursor];
 }
 
-- (void)drawRect:(NSRect)dirtyRect
+- (CGFloat)keyboardFocusRadius { return FloatingButtonRadius - 2; }
+
+- (void)drawButtonBackground
 {
-    NSBezierPath* shape = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(self.bounds, 0.5, 0.5)
-                                                         xRadius:13 yRadius:13];
-    [rgb(0xf7f9fd) setFill];
+    auto* shape = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(self.bounds, 0.5, 0.5)
+                                                 xRadius:FloatingButtonRadius yRadius:FloatingButtonRadius];
+    [([self buttonFillColor] ?: rgb(0xf7f9fd)) setFill];
     [shape fill];
     [rgb(0xc6d1e0) setStroke];
     [shape stroke];
-    [super drawRect:dirtyRect];
 }
 @end
 
