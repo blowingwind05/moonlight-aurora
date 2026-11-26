@@ -257,7 +257,7 @@ NvHTTP::getServerInfo(NvLogLevel logLevel, bool fastFail)
     return serverInfo;
 }
 
-void
+bool
 NvHTTP::startApp(QString verb,
                  bool isGfe,
                  int appId,
@@ -266,13 +266,16 @@ NvHTTP::startApp(QString verb,
                  bool localAudio,
                  int gamepadMask,
                  bool persistGameControllersOnDisconnect,
-                 QString& rtspSessionUrl)
+                 QString& rtspSessionUrl,
+                 bool requestClientCursor)
 {
 #ifdef AURORA_STREAM_RUNTIME
     if (streamConfig->requireEncryption && (!m_ExactEndpoint || m_ServerCert.isNull() || !httpsPort())) {
         throw GfeHttpResponseException(401, "Encrypted streaming requires a verified host certificate");
     }
 #endif
+    const bool offerClientCursor = requestClientCursor && streamConfig->requireEncryption &&
+                                   m_ExactEndpoint && !m_ServerCert.isNull() && httpsPort();
     int riKeyId;
 
     memcpy(&riKeyId, streamConfig->remoteInputAesIv, sizeof(riKeyId));
@@ -300,6 +303,7 @@ NvHTTP::startApp(QString verb,
                                    "&remoteControllersBitmap="+QString::number(gamepadMask)+
                                    "&gcmap="+QString::number(gamepadMask)+
                                    "&gcpersist="+QString::number(persistGameControllersOnDisconnect ? 1 : 0)+
+                                   (offerClientCursor ? QStringLiteral("&auroraClientCursor=1") : QString())+
                                    LiGetLaunchUrlQueryParameters(),
                                    LAUNCH_TIMEOUT_MS);
 
@@ -309,6 +313,7 @@ NvHTTP::startApp(QString verb,
     verifyResponseStatus(response);
 
     rtspSessionUrl = getXmlString(response, "sessionUrl0");
+    return offerClientCursor && getXmlString(response, "AuroraClientCursor") == QLatin1String("1");
 }
 
 void

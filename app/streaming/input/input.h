@@ -58,6 +58,7 @@ public:
     ~SdlInputHandler();
 
     void setWindow(SDL_Window* window);
+    void enableClientDesktopCursor();
 
     void handleKeyEvent(SDL_KeyboardEvent* event);
 

@@ -180,6 +180,7 @@ private:
     StreamingPreferences* m_Preferences;
     bool m_IsFullScreen;
     STREAM_CONFIGURATION m_StreamConfig;
+    bool m_ClientCursorConfirmed = false;
     DECODER_RENDERER_CALLBACKS m_VideoCallbacks;
     AUDIO_RENDERER_CALLBACKS m_AudioCallbacks;
     NvComputer* m_Computer;

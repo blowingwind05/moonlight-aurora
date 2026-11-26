@@ -173,7 +173,7 @@ public:
     void
     quitApp();
 
-    void
+    bool
     startApp(QString verb,
              bool isGfe,
              int appId,
@@ -182,7 +182,8 @@ public:
              bool localAudio,
              int gamepadMask,
              bool persistGameControllersOnDisconnect,
-             QString& rtspSessionUrl);
+             QString& rtspSessionUrl,
+             bool requestClientCursor = false);
 
     QVector<NvApp>
     getAppList();

@@ -378,6 +378,14 @@ bool SdlInputHandler::isSystemKeyCaptureActive()
     return true;
 }
 
+void SdlInputHandler::enableClientDesktopCursor()
+{
+    if (m_AbsoluteMouseMode) {
+        // The paired host confirmed the capture excludes its desktop pointer.
+        m_MouseCursorCapturedVisibilityState = SDL_ENABLE;
+    }
+}
+
 void SdlInputHandler::setCaptureActive(bool active)
 {
     if (active) {

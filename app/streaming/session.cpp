@@ -1564,14 +1564,19 @@ bool Session::startConnectionAsync()
             return false;
         }
 #endif
-        http.startApp(m_Computer->currentGameId != 0 ? "resume" : "launch",
-                      m_Computer->isNvidiaServerSoftware,
-                      m_App.id, &m_StreamConfig,
-                      enableGameOptimizations,
-                      m_Preferences->playAudioOnHost,
-                      m_InputHandler->getAttachedGamepadMask(),
-                      !m_Preferences->multiController,
-                      rtspSessionUrl);
+        bool requestClientCursor = false;
+#ifdef AURORA_STREAM_RUNTIME
+        requestClientCursor = m_Preferences->absoluteMouseMode;
+#endif
+        m_ClientCursorConfirmed = http.startApp(m_Computer->currentGameId != 0 ? "resume" : "launch",
+                                               m_Computer->isNvidiaServerSoftware,
+                                               m_App.id, &m_StreamConfig,
+                                               enableGameOptimizations,
+                                               m_Preferences->playAudioOnHost,
+                                               m_InputHandler->getAttachedGamepadMask(),
+                                               !m_Preferences->multiController,
+                                               rtspSessionUrl,
+                                               requestClientCursor);
     } catch (const GfeHttpResponseException& e) {
         emit displayLaunchError(tr("Host returned error: %1").arg(e.toQString()));
         return false;
@@ -1989,6 +1994,9 @@ void Session::execInternal()
 #endif
 
     m_InputHandler->setWindow(m_Window);
+    if (m_ClientCursorConfirmed) {
+        m_InputHandler->enableClientDesktopCursor();
+    }
 
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
     const bool hasWindowedToolbar = !m_IsFullScreen &&
