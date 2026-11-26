@@ -809,7 +809,7 @@ namespace {
 - (void)closeControlCenter;
 - (void)positionControlCenter;
 - (void)prepareQtTitleBar;
-- (NSToolbarStyle)sessionToolbarStyle;
+- (NSWindowToolbarStyle)sessionToolbarStyle;
 - (void)checkQtTitleBar;
 - (void)hideQtTitleBar;
 - (void)destroyQtTitleBar;
@@ -970,7 +970,7 @@ static void installSessionToolbar(NSWindow* native, AuroraSessionToolbarControll
     }, Qt::QueuedConnection);
 }
 
-- (NSToolbarStyle)sessionToolbarStyle
+- (NSWindowToolbarStyle)sessionToolbarStyle
 {
     return _qtTitle ? NSWindowToolbarStyleUnified : NSWindowToolbarStyleUnifiedCompact;
 }
