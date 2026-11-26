@@ -786,7 +786,10 @@ namespace {
     AuroraMacTitleBarView* _qtTitle;
     AuroraQtTitleHost* _qtTitleHost;
     QVariantMap _displayState;
-    BOOL _checkedDisplays;
+    QElapsedTimer _lastDisplayProbe;
+    int _displayProbeCount;
+    BOOL _displayProbePending;
+    BOOL _displayUnsupported;
     QElapsedTimer _qtTitleProbe;
     BOOL _qtTitleFailed;
     BOOL _qtTitleHasFrame;
@@ -1007,7 +1010,6 @@ static void installSessionToolbar(NSWindow* native, AuroraSessionToolbarControll
     };
     _qtTitle->onDisplays = [self](const QRectF& rect) { [self showDisplaysFrom:rect]; };
     _qtTitle->rootObject()->setProperty("displaySnapshot", _displayState);
-    _checkedDisplays = NO;
     QObject::connect(_qtTitle, &QQuickWindow::frameSwapped, _qtTitle, [self] {
         _qtTitleHasFrame = YES;
     }, Qt::QueuedConnection);
@@ -2370,8 +2372,10 @@ static void installSessionToolbar(NSWindow* native, AuroraSessionToolbarControll
 
 - (void)checkDisplays
 {
-    if (_qtTitle && !_checkedDisplays)
-        [self requestDisplay:QStringLiteral("list") id:QString()];
+    if (!_qtTitle || !_qtTitle->isVisible() || !_displayState.isEmpty() ||
+        _displayUnsupported || _displayProbePending || _displayProbeCount >= 4) return;
+    if (_lastDisplayProbe.isValid() && !_lastDisplayProbe.hasExpired(900)) return;
+    [self requestDisplay:QStringLiteral("list") id:QString()];
 }
 
 - (void)requestDisplay:(const QString&)operation id:(const QString&)id
@@ -2386,8 +2390,13 @@ static void installSessionToolbar(NSWindow* native, AuroraSessionToolbarControll
         return;
     }
 
+    if (reading) {
+        if (_displayProbePending) return;
+        _displayProbePending = YES;
+        _lastDisplayProbe.start();
+        ++_displayProbeCount;
+    }
     privacy->displayBusy = !reading;
-    _checkedDisplays = YES;
     _qtTitle->rootObject()->setProperty("displayRequestBusy", !reading);
     _qtTitle->rootObject()->setProperty("creatingDisplay", operation == QLatin1String("create"));
     _qtTitle->rootObject()->setProperty("displayActionError", QString());
@@ -2396,8 +2405,9 @@ static void installSessionToolbar(NSWindow* native, AuroraSessionToolbarControll
     QThreadPool::globalInstance()->start([weak, windowId, operation, id]() {
         const auto session = weak.lock();
         if (!session || !session->live) return;
-        const auto snapshot = AuroraDisplayControls::snapshot(
-            runAuroraDisplayCommand(session->target, operation, id, session->live));
+        const auto response = runAuroraDisplayCommand(session->target, operation, id, session->live);
+        const auto snapshot = AuroraDisplayControls::snapshot(response);
+        const bool unsupported = response == "unsupported";
         if (!session->live) return;
 
         const auto mainLoop = CFRunLoopGetMain();
@@ -2407,6 +2417,10 @@ static void installSessionToolbar(NSWindow* native, AuroraSessionToolbarControll
             current->displayBusy = false;
             AuroraSessionToolbarController* toolbar = auroraToolbar(nativeWindow(SDL_GetWindowFromID(windowId)));
             if (!toolbar || toolbar->privacy != current || !toolbar->_qtTitle) return;
+            if (operation == QLatin1String("list")) {
+                toolbar->_displayProbePending = NO;
+                toolbar->_displayUnsupported = unsupported;
+            }
             auto* chrome = toolbar->_qtTitle->rootObject();
             chrome->setProperty("displayRequestBusy", false);
             chrome->setProperty("creatingDisplay", false);
@@ -2598,7 +2612,6 @@ bool installAuroraSessionToolbar(SDL_Window* window, const QString& deviceName, 
         return false;
     }
     if (native.toolbar.delegate == controller) {
-        [controller checkDisplays];
         [controller showIfWindowed];
         return true;
     }
@@ -2614,7 +2627,11 @@ bool serviceAuroraQtChrome(SDL_Window* window)
     // NSEvents away from SDL_WaitEventTimeout's Cocoa dispatcher.
     @autoreleasepool {
         CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, true);
-        if (qtTitleVisible) [auroraToolbar(nativeWindow(window)) checkQtTitleBar];
+        if (qtTitleVisible) {
+            auto* toolbar = auroraToolbar(nativeWindow(window));
+            [toolbar checkQtTitleBar];
+            [toolbar checkDisplays];
+        }
     }
     return qtTitleVisible || qtControlsVisible || qtAppearanceVisible;
 }
