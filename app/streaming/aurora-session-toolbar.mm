@@ -809,6 +809,7 @@ namespace {
 - (void)closeControlCenter;
 - (void)positionControlCenter;
 - (void)prepareQtTitleBar;
+- (NSToolbarStyle)sessionToolbarStyle;
 - (void)checkQtTitleBar;
 - (void)hideQtTitleBar;
 - (void)destroyQtTitleBar;
@@ -967,6 +968,11 @@ static void installSessionToolbar(NSWindow* native, AuroraSessionToolbarControll
     QObject::connect(_qtTitle, &QQuickWindow::sceneGraphError, _qtTitle, [self](QQuickWindow::SceneGraphError, const QString&) {
         _qtTitleFailed = YES;
     }, Qt::QueuedConnection);
+}
+
+- (NSToolbarStyle)sessionToolbarStyle
+{
+    return _qtTitle ? NSWindowToolbarStyleUnified : NSWindowToolbarStyleUnifiedCompact;
 }
 
 - (void)hideQtTitleBar
@@ -2104,13 +2110,13 @@ static void installSessionToolbar(NSWindow* native, AuroraSessionToolbarControll
     // AppKit owns the traffic lights and titlebar. Preserve the content geometry.
     const NSSize contentSize = native.contentView.bounds.size;
     native.titleVisibility = NSWindowTitleHidden;
-    native.toolbarStyle = NSWindowToolbarStyleUnifiedCompact;
     native.titlebarSeparatorStyle = NSTitlebarSeparatorStyleNone;
     native.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
     native.backgroundColor = rgb(0xedf1f8);
     native.titlebarAppearsTransparent = YES;
 
     [controller prepareQtTitleBar];
+    native.toolbarStyle = [controller sessionToolbarStyle];
     [controller resizeItems];
     auto* toolbar = [[NSToolbar alloc] initWithIdentifier:@"AuroraStreamUnifiedToolbar"];
     toolbar.displayMode = NSToolbarDisplayModeIconOnly;
