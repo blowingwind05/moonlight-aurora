@@ -1406,6 +1406,10 @@ void Session::toggleFullscreen()
     }
 #endif
     bool fullScreen = !(SDL_GetWindowFlags(m_Window) & m_FullScreenFlag);
+#if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
+    if (auroraSessionToolbarTransitioning(m_Window)) return;
+    prepareAuroraSessionToolbarForFullscreenChange(m_Window);
+#endif
 
 #if defined(Q_OS_WIN32) || defined(Q_OS_DARWIN)
     // Destroy the video decoder before toggling full-screen because D3D9 can try
@@ -1424,10 +1428,15 @@ void Session::toggleFullscreen()
 
     // Actually enter/leave fullscreen
 #if defined(Q_OS_DARWIN) && defined(AURORA_STREAM_RUNTIME)
-    prepareAuroraSessionToolbarForFullscreenChange(m_Window, fullScreen);
-    SDL_SetWindowFullscreen(m_Window, fullScreen ? m_FullScreenFlag : 0);
-    installAuroraSessionToolbar(m_Window, m_Computer->name, SDL_AtomicGet(&m_AuroraConnectionPoor) != 0,
-                                m_AuroraPrivacy, m_ActiveVideoWidth, m_ActiveVideoHeight);
+    const bool accepted = SDL_SetWindowFullscreen(m_Window, fullScreen ? m_FullScreenFlag : 0) == 0;
+    finishAuroraSessionToolbarFullscreenChange(m_Window, accepted);
+    if (!accepted) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Could not change macOS fullscreen state: %s", SDL_GetError());
+        // A failed toggle may not send a resize event to rebuild the decoder.
+        SDL_Event reset{};
+        reset.type = SDL_RENDER_DEVICE_RESET;
+        SDL_PushEvent(&reset);
+    }
 #else
     SDL_SetWindowFullscreen(m_Window, fullScreen ? m_FullScreenFlag : 0);
 #endif
@@ -2211,6 +2220,11 @@ void Session::execInternal()
                 if (event.user.windowID == SDL_GetWindowID(m_Window)) {
                     toggleFullscreen();
                     m_InputHandler->raiseAllKeys();
+                }
+                break;
+            case static_cast<Sint32>(AuroraToolbarAction::SyncFullscreenChrome):
+                if (event.user.windowID == SDL_GetWindowID(m_Window)) {
+                    syncAuroraSessionFullscreenChrome(m_Window);
                 }
                 break;
             case static_cast<Sint32>(AuroraToolbarAction::ReleaseMouse):

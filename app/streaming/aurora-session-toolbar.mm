@@ -19,6 +19,7 @@
 namespace {
     constexpr CGFloat GroupHeight = 44;
     constexpr CGFloat DisplayTabHeight = 37;
+    constexpr CGFloat DisplayTabTopInset = 7;
     constexpr CGFloat BrandSize = 28;
     constexpr CGFloat ButtonHeight = 32;
     constexpr CGFloat FloatingButtonSize = 40;
@@ -428,7 +429,7 @@ namespace {
 {
     if (_option) return rgb(_selectedOption ? 0xe2e7ef : _hover ? 0xe8edf4 : 0xf4f6fa);
     if (!self.enabled || !(_hover || _menuOpen || self.cell.highlighted)) return nil;
-    return rgb(_warning ? 0xfbe7e8 : (_menuOpen || self.cell.highlighted) ? 0xe2e7ef : 0xe8edf4);
+    return rgb(_warning ? 0xf6e4e7 : (_menuOpen || self.cell.highlighted) ? 0xe2e7ef : 0xe8edf4);
 }
 
 - (void)drawButtonBackground
@@ -442,17 +443,20 @@ namespace {
 - (void)drawRect:(NSRect)dirtyRect
 {
     [self drawButtonBackground];
+    const unsigned ink = !self.enabled ? (_option ? 0x8390a1 : 0x9ba7b7) :
+        _warning && (_hover || self.cell.highlighted) ? 0x9a3241 :
+        _option && _selectedOption ? 0x2350b4 : 0x19283f;
+    NSColor* foreground = rgb(ink);
+    if (![_glyph.contentTintColor isEqual:foreground]) _glyph.contentTintColor = foreground;
     if (_showsLabel && !NSIsEmptyRect(_textRect)) {
         // Measure and draw with the same font. An NSTextField cell adds its own
         // drawing insets inside its assigned frame, which can elide even a two-character label.
         auto* paragraph = [[[NSMutableParagraphStyle alloc] init] autorelease];
         paragraph.alignment = _option ? NSTextAlignmentCenter : NSTextAlignmentLeft;
         paragraph.lineBreakMode = NSLineBreakByTruncatingTail;
-        const unsigned ink = !self.enabled ? (_option ? 0x8390a1 : 0x9ba7b7) :
-            _option && _selectedOption ? 0x2350b4 : 0x19283f;
         [_label drawWithRect:_textRect
                      options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingTruncatesLastVisibleLine
-                  attributes:@{NSFontAttributeName:[self labelFont], NSForegroundColorAttributeName:rgb(ink),
+                  attributes:@{NSFontAttributeName:[self labelFont], NSForegroundColorAttributeName:foreground,
                                NSParagraphStyleAttributeName:paragraph}
                      context:nil];
     }
@@ -729,6 +733,8 @@ namespace {
     NSInteger _controlPage;
     BOOL _showFloatingControls;
     BOOL _nativeFullscreen;
+    BOOL _nativeFullscreenTransition;
+    BOOL _sdlFullscreenRequest;
     NSSize _videoAspect;
 }
 - (instancetype)initWithWindow:(NSWindow*)window deviceName:(NSString*)name connecting:(BOOL)connecting;
@@ -745,6 +751,10 @@ namespace {
 - (void)setVideoWidth:(int)width height:(int)height fullscreen:(BOOL)fullscreen;
 - (void)showFullscreenControls:(BOOL)visible;
 - (void)positionFullscreenControls;
+- (BOOL)fullscreenTransitioning;
+- (void)beginFullscreenRequest;
+- (void)finishFullscreenRequest:(BOOL)accepted;
+- (void)syncFullscreenChrome;
 - (void)updateConnectionQuality:(BOOL)poor;
 - (void)requestPrivacy:(AuroraPrivacyOperation)operation;
 - (void)updatePrivacyMenu;
@@ -833,6 +843,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     [notifications addObserver:self selector:@selector(positionDisplayTab:) name:NSWindowDidUpdateNotification object:window];
     [notifications addObserver:self selector:@selector(windowWillEnterFullscreen:) name:NSWindowWillEnterFullScreenNotification object:window];
     [notifications addObserver:self selector:@selector(windowDidEnterFullscreen:) name:NSWindowDidEnterFullScreenNotification object:window];
+    [notifications addObserver:self selector:@selector(windowWillExitFullscreen:) name:NSWindowWillExitFullScreenNotification object:window];
     [notifications addObserver:self selector:@selector(windowDidExitFullscreen:) name:NSWindowDidExitFullScreenNotification object:window];
     [self resizeItems];
     return self;
@@ -898,7 +909,8 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 
 - (void)positionDisplayTab:(NSNotification*)notification
 {
-    if (_nativeFullscreen || (_window.styleMask & NSWindowStyleMaskFullScreen) || !_window.toolbar.visible ||
+    if ([self fullscreenTransitioning] || _nativeFullscreen ||
+        (_window.styleMask & NSWindowStyleMaskFullScreen) || !_window.toolbar.visible ||
         _context.window != _window || _context.hiddenOrHasHiddenAncestor ||
         !NSContainsRect(_context.visibleRect, _displaySlot)) {
         if (!_display.hidden) _display.hidden = YES;
@@ -912,6 +924,12 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     while (frameView.superview) frameView = frameView.superview;
     NSRect tab = [_context convertRect:_displaySlot toView:nil];
     tab.origin.y = NSMaxY(_window.contentLayoutRect);
+    const NSRect frame = [frameView convertRect:frameView.bounds toView:nil];
+    tab.size.height = std::min(DisplayTabHeight, NSMaxY(frame) - tab.origin.y - DisplayTabTopInset);
+    if (NSHeight(tab) < 22) {
+        _display.hidden = YES;
+        return;
+    }
     tab = [frameView convertRect:tab fromView:nil];
     if (_display.superview != frameView) {
         [_display removeFromSuperviewWithoutNeedingDisplay];
@@ -948,7 +966,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 
 - (void)showIfWindowed
 {
-    if (!_nativeFullscreen && !(_window.styleMask & NSWindowStyleMaskFullScreen)) {
+    if (![self fullscreenTransitioning] && !_nativeFullscreen && !(_window.styleMask & NSWindowStyleMaskFullScreen)) {
         if (!_window.toolbar.visible) _window.toolbar.visible = YES;
         [self resizeItems];
     }
@@ -994,6 +1012,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 
 - (void)windowResized:(NSNotification*)notification
 {
+    if ([self fullscreenTransitioning]) return;
     if (_floatingPanel.parentWindow == _window) [self positionFullscreenControls];
     if (_controlCenter.visible) [self positionControlCenter];
     if (!_nativeFullscreen && !(_window.styleMask & NSWindowStyleMaskFullScreen)) {
@@ -1006,28 +1025,80 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
     _videoAspect = width > 0 && height > 0 ? NSMakeSize(static_cast<CGFloat>(width) / height, 1) : NSZeroSize;
     const NSSize aspect = fullscreen || _nativeFullscreen ? NSZeroSize : _videoAspect;
     // Constrain the video content, leaving titlebar sizing and drag behavior to AppKit.
-    if (!NSEqualSizes(_window.contentAspectRatio, aspect)) _window.contentAspectRatio = aspect;
+    if (![self fullscreenTransitioning] && !NSEqualSizes(_window.contentAspectRatio, aspect))
+        _window.contentAspectRatio = aspect;
+}
+
+- (BOOL)fullscreenTransitioning
+{
+    return _nativeFullscreenTransition || _sdlFullscreenRequest;
+}
+
+- (void)detachFullscreenChrome
+{
+    [self closeControlCenter];
+    [self closeConnectionDetails];
+    [self showFullscreenControls:NO];
+    _display.hidden = YES;
+}
+
+- (void)beginFullscreenRequest
+{
+    _sdlFullscreenRequest = YES;
+    [self detachFullscreenChrome];
+    if (!NSEqualSizes(_window.contentAspectRatio, NSZeroSize))
+        _window.contentAspectRatio = NSZeroSize;
+}
+
+- (void)finishFullscreenRequest:(BOOL)accepted
+{
+    _sdlFullscreenRequest = NO;
+    if (!accepted) _nativeFullscreenTransition = NO;
+    sendAction(streamWindowId, AuroraToolbarAction::SyncFullscreenChrome);
 }
 
 - (void)windowWillEnterFullscreen:(NSNotification*)notification
 {
-    _nativeFullscreen = YES;
-    _window.contentAspectRatio = NSZeroSize;
-    _window.toolbar.visible = NO;
-    [self positionDisplayTab:nil];
+    _nativeFullscreenTransition = YES;
+    [self detachFullscreenChrome];
 }
 
 - (void)windowDidEnterFullscreen:(NSNotification*)notification
 {
-    [self showFullscreenControls:YES];
+    _nativeFullscreenTransition = NO;
+    sendAction(streamWindowId, AuroraToolbarAction::SyncFullscreenChrome);
+}
+
+- (void)windowWillExitFullscreen:(NSNotification*)notification
+{
+    _nativeFullscreenTransition = YES;
+    [self detachFullscreenChrome];
 }
 
 - (void)windowDidExitFullscreen:(NSNotification*)notification
 {
-    _nativeFullscreen = NO;
-    _window.contentAspectRatio = _videoAspect;
-    [self showFullscreenControls:NO];
-    [self showIfWindowed];
+    _nativeFullscreenTransition = NO;
+    sendAction(streamWindowId, AuroraToolbarAction::SyncFullscreenChrome);
+}
+
+- (void)syncFullscreenChrome
+{
+    // SDL may dispatch Cocoa notifications inside its fullscreen call.
+    // Apply layout on the session loop once both transitions have returned.
+    if ([self fullscreenTransitioning]) return;
+    auto* sdl = SDL_GetWindowFromID(streamWindowId);
+    if (!sdl) return;
+    _nativeFullscreen = (_window.styleMask & NSWindowStyleMaskFullScreen) ||
+                        (SDL_GetWindowFlags(sdl) & SDL_WINDOW_FULLSCREEN);
+    const NSSize aspect = _nativeFullscreen ? NSZeroSize : _videoAspect;
+    if (!NSEqualSizes(_window.contentAspectRatio, aspect)) _window.contentAspectRatio = aspect;
+    if (_nativeFullscreen) {
+        if (_window.toolbar.visible) _window.toolbar.visible = NO;
+        [self showFullscreenControls:YES];
+    } else {
+        [self showFullscreenControls:NO];
+        [self showIfWindowed];
+    }
 }
 
 - (NSArray<NSToolbarItemIdentifier>*)toolbarAllowedItemIdentifiers:(NSToolbar*)toolbar
@@ -1073,8 +1144,10 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 - (AuroraToolbarButton*)controlRow:(NSString*)title symbol:(NSString*)symbol
                               y:(CGFloat)y action:(SEL)action tag:(NSInteger)tag next:(BOOL)next
 {
+    const BOOL warning = action == @selector(runControlAction:) &&
+                         tag == static_cast<NSInteger>(AuroraToolbarAction::Disconnect);
     auto* button = [[[AuroraToolbarButton alloc] initWithLabel:title symbol:symbol
-        target:self action:action warning:NO] autorelease];
+        target:self action:action warning:warning] autorelease];
     button.tag = tag;
     button.frame = NSMakeRect(0, y, 274, 34);
     [button useMenuLayout:next];
@@ -1169,13 +1242,12 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
         divider.boxType = NSBoxSeparator;
         [body addSubview:divider];
         y += 11;
-        if (_showFloatingControls) {
+        if (_showFloatingControls)
             row(@"连接详情", @"info.circle", @selector(showFullscreenDetails:), 0);
-            row(@"断开连接", @"rectangle.portrait.and.arrow.right", @selector(runControlAction:),
-                static_cast<NSInteger>(AuroraToolbarAction::Disconnect));
-        }
         row(_showFloatingControls ? @"退出全屏" : @"全屏", @"arrow.up.left.and.arrow.down.right",
             @selector(runControlAction:), static_cast<NSInteger>(AuroraToolbarAction::ToggleFullscreen));
+        row(@"断开远控", @"rectangle.portrait.and.arrow.right", @selector(runControlAction:),
+            static_cast<NSInteger>(AuroraToolbarAction::Disconnect));
     } else {
         row(titles[_controlPage - 1], @"arrow.left", @selector(openControlPage:), 0);
         if (_controlPage != 4) {
@@ -1772,8 +1844,11 @@ bool installAuroraSessionToolbar(SDL_Window* window, const QString& deviceName, 
         [controller requestPrivacy:AuroraPrivacyOperation::Status];
 
     [controller setVideoWidth:videoWidth height:videoHeight fullscreen:fullscreen];
-    [controller showFullscreenControls:fullscreen];
-    if (fullscreen) return false;
+    if ([controller fullscreenTransitioning]) return false;
+    if (fullscreen) {
+        [controller syncFullscreenChrome];
+        return false;
+    }
     if (native.toolbar.delegate == controller) {
         [controller showIfWindowed];
         return true;
@@ -1783,13 +1858,24 @@ bool installAuroraSessionToolbar(SDL_Window* window, const QString& deviceName, 
     return true;
 }
 
-void prepareAuroraSessionToolbarForFullscreenChange(SDL_Window* window, bool enteringFullscreen)
+bool auroraSessionToolbarTransitioning(SDL_Window* window)
 {
-    NSWindow* native = nativeWindow(window);
-    if (!auroraToolbar(native)) return;
+    return [auroraToolbar(nativeWindow(window)) fullscreenTransitioning];
+}
 
-    native.contentAspectRatio = NSZeroSize;
-    if (!enteringFullscreen && native.toolbar.visible) native.toolbar.visible = NO;
+void prepareAuroraSessionToolbarForFullscreenChange(SDL_Window* window)
+{
+    [auroraToolbar(nativeWindow(window)) beginFullscreenRequest];
+}
+
+void finishAuroraSessionToolbarFullscreenChange(SDL_Window* window, bool accepted)
+{
+    [auroraToolbar(nativeWindow(window)) finishFullscreenRequest:accepted];
+}
+
+void syncAuroraSessionFullscreenChrome(SDL_Window* window)
+{
+    [auroraToolbar(nativeWindow(window)) syncFullscreenChrome];
 }
 
 void closeAuroraFullscreenControls(SDL_Window* window)

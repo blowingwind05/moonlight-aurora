@@ -15,11 +15,15 @@ enum class AuroraToolbarAction : Sint32 {
     ReleaseMouse,
     ConnectionQualityChanged,
     RouteSwitch,
+    SyncFullscreenChrome,
 };
 
 bool installAuroraSessionToolbar(SDL_Window* window, const QString& deviceName, bool connectionPoor,
                                  const std::shared_ptr<AuroraSessionPrivacy>& privacy, int videoWidth, int videoHeight);
-void prepareAuroraSessionToolbarForFullscreenChange(SDL_Window* window, bool enteringFullscreen);
+bool auroraSessionToolbarTransitioning(SDL_Window* window);
+void prepareAuroraSessionToolbarForFullscreenChange(SDL_Window* window);
+void finishAuroraSessionToolbarFullscreenChange(SDL_Window* window, bool accepted);
+void syncAuroraSessionFullscreenChrome(SDL_Window* window);
 void closeAuroraFullscreenControls(SDL_Window* window);
 void setAuroraSessionToolbarConnectionQuality(SDL_Window* window, bool poor);
 
