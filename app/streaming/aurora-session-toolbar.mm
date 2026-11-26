@@ -1166,8 +1166,7 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
 
 - (BOOL)renderQtControlHome
 {
-    if (_controlPage != 0 || _showFloatingControls || _nativeFullscreen ||
-        [self fullscreenTransitioning] || !auroraMacSessionChromeEnabled()) return NO;
+    if (_controlPage != 0 || [self fullscreenTransitioning] || !auroraMacSessionChromeEnabled()) return NO;
     if (!_qtControls) {
         _qtControls = new AuroraMacControlsView(auroraMacSessionQml(QStringLiteral("MacStreamControls.qml")));
         if (_qtControls->status() != QQuickView::Ready) {
@@ -1179,13 +1178,16 @@ static AuroraSessionToolbarController* auroraToolbar(NSWindow* window)
         _qtControls->onOpenPage = [self](int page) { [self showControlPage:page]; };
         _qtControls->onToggleFullscreen = [self] { [self dispatchControlAction:AuroraToolbarAction::ToggleFullscreen]; };
         _qtControls->onDisconnect = [self] { [self dispatchControlAction:AuroraToolbarAction::Disconnect]; };
+        _qtControls->onShowConnectionDetails = [self] { [self showFullscreenDetails:_controlAnchor]; };
     }
 
     auto* root = _controlCenter.contentView;
     CGFloat available = NSHeight(_window.contentView.bounds) - 32;
     if (_window.screen) available = std::min(available, NSHeight(_window.screen.visibleFrame) - 100);
     auto* menu = _qtControls->rootObject();
+    menu->setProperty("fullScreen", _showFloatingControls == YES);
     menu->setProperty("heightLimit", qRound(std::max(CGFloat(124), available)));
+    QMetaObject::invokeMethod(menu, "layoutNativeHome");
     const NSSize size = NSMakeSize(menu->width(), menu->height());
     if (size.width <= 0 || size.height <= 0) return NO;
 
